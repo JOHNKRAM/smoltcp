@@ -6,7 +6,7 @@ use std::os::unix::io::{AsRawFd, RawFd};
 #[derive(Debug)]
 pub struct TunTapInterfaceDesc {
     lower: libc::c_int,
-    mtu: usize,
+    // mtu: usize,
 }
 
 impl AsRawFd for TunTapInterfaceDesc {
@@ -30,13 +30,13 @@ impl TunTapInterfaceDesc {
 
         let mut ifreq = ifreq_for(name);
         Self::attach_interface_ifreq(lower, medium, &mut ifreq)?;
-        let mtu = Self::mtu_ifreq(medium, &mut ifreq)?;
+        // let mtu = Self::mtu_ifreq(medium, &mut ifreq)?;
 
-        Ok(TunTapInterfaceDesc { lower, mtu })
+        Ok(TunTapInterfaceDesc { lower /*mtu*/ })
     }
 
     pub fn from_fd(fd: RawFd, mtu: usize) -> io::Result<TunTapInterfaceDesc> {
-        Ok(TunTapInterfaceDesc { lower: fd, mtu })
+        Ok(TunTapInterfaceDesc { lower: fd, /*mtu*/ })
     }
 
     fn attach_interface_ifreq(
@@ -52,7 +52,7 @@ impl TunTapInterfaceDesc {
             #[cfg(feature = "medium-ieee802154")]
             Medium::Ieee802154 => todo!(),
         };
-        ifr.ifr_data = mode | imp::IFF_NO_PI;
+        ifr.ifr_data = mode | imp::IFF_NO_PI | imp::IFF_MULTI_QUEUE;
         ifreq_ioctl(lower, ifr, imp::TUNSETIFF).map(|_| ())
     }
 
@@ -88,11 +88,11 @@ impl TunTapInterfaceDesc {
         Ok(mtu)
     }
 
-    pub fn interface_mtu(&self) -> io::Result<usize> {
-        Ok(self.mtu)
-    }
+    // pub fn interface_mtu(&self) -> io::Result<usize> {
+    //     Ok(self.mtu)
+    // }
 
-    pub fn recv(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+    pub fn recv(&self, buffer: &mut [u8]) -> io::Result<usize> {
         unsafe {
             let len = libc::read(
                 self.lower,
@@ -106,7 +106,7 @@ impl TunTapInterfaceDesc {
         }
     }
 
-    pub fn send(&mut self, buffer: &[u8]) -> io::Result<usize> {
+    pub fn send(&self, buffer: &[u8]) -> io::Result<usize> {
         unsafe {
             let len = libc::write(
                 self.lower,
@@ -119,12 +119,27 @@ impl TunTapInterfaceDesc {
             Ok(len as usize)
         }
     }
+
+    pub fn get_mtu(name: &str, medium: Medium) -> io::Result<usize> {
+        let mut ifreq = ifreq_for(name);
+        Self::mtu_ifreq(medium, &mut ifreq)
+    }
 }
 
 impl Drop for TunTapInterfaceDesc {
     fn drop(&mut self) {
-        unsafe {
-            libc::close(self.lower);
+        if self.lower != -1 {
+            unsafe {
+                libc::close(self.lower);
+            }
+        }
+    }
+}
+
+impl Default for TunTapInterfaceDesc {
+    fn default() -> Self {
+        Self {
+            lower: -1, /*mtu: 0*/
         }
     }
 }

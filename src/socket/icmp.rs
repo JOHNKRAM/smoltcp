@@ -418,7 +418,7 @@ impl<'a> Socket<'a> {
     #[inline]
     pub(crate) fn accepts_v4(
         &self,
-        cx: &mut Context,
+        cx: &Context,
         ip_repr: &Ipv4Repr,
         icmp_repr: &Icmpv4Repr,
     ) -> bool {
@@ -460,7 +460,7 @@ impl<'a> Socket<'a> {
     #[inline]
     pub(crate) fn accepts_v6(
         &self,
-        cx: &mut Context,
+        cx: &Context,
         ip_repr: &Ipv6Repr,
         icmp_repr: &Icmpv6Repr,
     ) -> bool {
@@ -497,12 +497,7 @@ impl<'a> Socket<'a> {
     }
 
     #[cfg(feature = "proto-ipv4")]
-    pub(crate) fn process_v4(
-        &mut self,
-        _cx: &mut Context,
-        ip_repr: &Ipv4Repr,
-        icmp_repr: &Icmpv4Repr,
-    ) {
+    pub(crate) fn process_v4(&mut self, _cx: &Context, ip_repr: &Ipv4Repr, icmp_repr: &Icmpv4Repr) {
         net_trace!("icmp: receiving {} octets", icmp_repr.buffer_len());
 
         match self
@@ -523,12 +518,7 @@ impl<'a> Socket<'a> {
     }
 
     #[cfg(feature = "proto-ipv6")]
-    pub(crate) fn process_v6(
-        &mut self,
-        _cx: &mut Context,
-        ip_repr: &Ipv6Repr,
-        icmp_repr: &Icmpv6Repr,
-    ) {
+    pub(crate) fn process_v6(&mut self, _cx: &Context, ip_repr: &Ipv6Repr, icmp_repr: &Icmpv6Repr) {
         net_trace!("icmp: receiving {} octets", icmp_repr.buffer_len());
 
         match self
@@ -548,9 +538,9 @@ impl<'a> Socket<'a> {
         self.rx_waker.wake();
     }
 
-    pub(crate) fn dispatch<F, E>(&mut self, cx: &mut Context, emit: F) -> Result<(), E>
+    pub(crate) fn dispatch<F, E>(&mut self, cx: &Context, emit: F) -> Result<(), E>
     where
-        F: FnOnce(&mut Context, (IpRepr, IcmpRepr)) -> Result<(), E>,
+        F: FnOnce(&Context, (IpRepr, IcmpRepr)) -> Result<(), E>,
     {
         let hop_limit = self.hop_limit.unwrap_or(64);
         let res = self.tx_buffer.dequeue_with(|remote_endpoint, packet_buf| {
@@ -634,7 +624,7 @@ impl<'a> Socket<'a> {
         }
     }
 
-    pub(crate) fn poll_at(&self, _cx: &mut Context) -> PollAt {
+    pub(crate) fn poll_at(&self, _cx: &Context) -> PollAt {
         if self.tx_buffer.is_empty() {
             PollAt::Ingress
         } else {

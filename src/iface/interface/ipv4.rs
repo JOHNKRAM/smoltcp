@@ -1,4 +1,5 @@
 use super::*;
+use core::sync::atomic::Ordering::Relaxed;
 
 impl Interface {
     /// Process fragments that still need to be sent for IPv4 packets.
@@ -7,24 +8,29 @@ impl Interface {
     /// processed or emitted, and thus, whether the readiness of any socket might
     /// have changed.
     #[cfg(feature = "proto-ipv4-fragmentation")]
-    pub(super) fn ipv4_egress<D>(&mut self, device: &mut D) -> bool
+    pub(super) fn ipv4_egress<D>(&self, device: &D, queue_id: usize, now: Instant) -> bool
     where
         D: Device + ?Sized,
     {
+        let fragmenter_guard = self.get_fragmenter_ingress(queue_id);
+        if fragmenter_guard.is_none() {
+            return false;
+        }
+        let mut fragmenter_guard = fragmenter_guard.unwrap();
+        let fragmenter = fragmenter_guard.deref_mut();
         // Reset the buffer when we transmitted everything.
-        if self.fragmenter.finished() {
-            self.fragmenter.reset();
+        if fragmenter.finished() {
+            fragmenter.reset();
         }
 
-        if self.fragmenter.is_empty() {
+        if fragmenter.is_empty() {
             return false;
         }
 
-        let pkt = &self.fragmenter;
+        let pkt = fragmenter;
         if pkt.packet_len > pkt.sent_bytes {
-            if let Some(tx_token) = device.transmit(self.inner.now) {
-                self.inner
-                    .dispatch_ipv4_frag(tx_token, &mut self.fragmenter);
+            if let Some(tx_token) = device.transmit(now, queue_id) {
+                self.inner.dispatch_ipv4_frag(tx_token, pkt);
                 return true;
             }
         }
@@ -35,10 +41,8 @@ impl Interface {
 impl InterfaceInner {
     /// Get the next IPv4 fragment identifier.
     #[cfg(feature = "proto-ipv4-fragmentation")]
-    pub(super) fn next_ipv4_frag_ident(&mut self) -> u16 {
-        let ipv4_id = self.ipv4_id;
-        self.ipv4_id = self.ipv4_id.wrapping_add(1);
-        ipv4_id
+    pub(super) fn next_ipv4_frag_ident(&self) -> u16 {
+        self.ipv4_id.fetch_add(1, Relaxed)
     }
 
     /// Get an IPv4 source address based on a destination address.
@@ -88,11 +92,13 @@ impl InterfaceInner {
     }
 
     pub(super) fn process_ipv4<'a>(
-        &mut self,
-        sockets: &mut SocketSet,
+        &self,
+        sockets: &SocketSet,
         meta: PacketMeta,
         ipv4_packet: &Ipv4Packet<&'a [u8]>,
         frag: &'a mut FragmentsBuffer,
+        queue_id: usize,
+        now: Instant,
     ) -> Option<Packet<'a>> {
         let ipv4_repr = check!(Ipv4Repr::parse(ipv4_packet, &self.caps.checksum));
         if !self.is_unicast_v4(ipv4_repr.src_addr) && !ipv4_repr.src_addr.is_unspecified() {
@@ -106,7 +112,7 @@ impl InterfaceInner {
             if ipv4_packet.more_frags() || ipv4_packet.frag_offset() != 0 {
                 let key = FragKey::Ipv4(ipv4_packet.get_key());
 
-                let f = match frag.assembler.get(&key, self.now + frag.reassembly_timeout) {
+                let f = match frag.assembler.get(&key, now + frag.reassembly_timeout) {
                     Ok(f) => f,
                     Err(_) => {
                         net_debug!("No available packet assembler for fragmented packet");
@@ -157,24 +163,33 @@ impl InterfaceInner {
                 && matches!(self.caps.medium, Medium::Ethernet)
             {
                 let udp_packet = check!(UdpPacket::new_checked(ip_payload));
-                if let Some(dhcp_socket) = sockets
-                    .items_mut()
-                    .find_map(|i| Dhcpv4Socket::downcast_mut(&mut i.socket))
-                {
-                    // First check for source and dest ports, then do `UdpRepr::parse` if they match.
-                    // This way we avoid validating the UDP checksum twice for all non-DHCP UDP packets (one here, one in `process_udp`)
-                    if udp_packet.src_port() == dhcp_socket.server_port
-                        && udp_packet.dst_port() == dhcp_socket.client_port
-                    {
-                        let udp_repr = check!(UdpRepr::parse(
-                            &udp_packet,
-                            &ipv4_repr.src_addr.into(),
-                            &ipv4_repr.dst_addr.into(),
-                            &self.caps.checksum
-                        ));
-                        dhcp_socket.process(self, &ipv4_repr, &udp_repr, udp_packet.payload());
-                        return None;
+                // First check for source and dest ports, then do `UdpRepr::parse` if they match.
+                // This way we avoid validating the UDP checksum twice for all non-DHCP UDP packets (one here, one in `process_udp`)
+                for dhcp_socket in sockets.items() {
+                    if let Some(socket) = dhcp_socket.socket.try_read().ok() {
+                        if let Some(socket) = Dhcpv4Socket::downcast(&socket) {
+                            if !(udp_packet.src_port() == socket.server_port
+                                && udp_packet.dst_port() == socket.client_port)
+                            {
+                                continue;
+                            }
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        continue;
                     }
+                    dhcp_socket.queue_id.store(queue_id, Relaxed);
+                    let mut socket = dhcp_socket.socket.write().unwrap();
+                    let dhcp_socket = Dhcpv4Socket::downcast_mut(&mut socket).unwrap();
+                    let udp_repr = check!(UdpRepr::parse(
+                        &udp_packet,
+                        &ipv4_repr.src_addr.into(),
+                        &ipv4_repr.dst_addr.into(),
+                        &self.caps.checksum
+                    ));
+                    dhcp_socket.process(self, &ipv4_repr, &udp_repr, udp_packet.payload(), now);
+                    return None;
                 }
             }
         }
@@ -189,7 +204,7 @@ impl InterfaceInner {
                 || !ipv4_repr.dst_addr.is_unicast()
                 || self
                     .routes
-                    .lookup(&IpAddress::Ipv4(ipv4_repr.dst_addr), self.now)
+                    .lookup(&IpAddress::Ipv4(ipv4_repr.dst_addr), now)
                     .map_or(true, |router_addr| !self.has_ip_addr(router_addr))
             {
                 return None;
@@ -197,18 +212,23 @@ impl InterfaceInner {
         }
 
         match ipv4_repr.next_header {
-            IpProtocol::Icmp => self.process_icmpv4(sockets, ipv4_repr, ip_payload),
+            IpProtocol::Icmp => self.process_icmpv4(sockets, ipv4_repr, ip_payload, queue_id),
 
             #[cfg(feature = "proto-igmp")]
-            IpProtocol::Igmp => self.process_igmp(ipv4_repr, ip_payload),
+            IpProtocol::Igmp => self.process_igmp(ipv4_repr, ip_payload, now),
 
             #[cfg(any(feature = "socket-udp", feature = "socket-dns"))]
-            IpProtocol::Udp => {
-                self.process_udp(sockets, meta, handled_by_raw_socket, ip_repr, ip_payload)
-            }
+            IpProtocol::Udp => self.process_udp(
+                sockets,
+                meta,
+                handled_by_raw_socket,
+                ip_repr,
+                ip_payload,
+                queue_id,
+            ),
 
             #[cfg(feature = "socket-tcp")]
-            IpProtocol::Tcp => self.process_tcp(sockets, ip_repr, ip_payload),
+            IpProtocol::Tcp => self.process_tcp(sockets, ip_repr, ip_payload, queue_id, now),
 
             _ if handled_by_raw_socket => None,
 
@@ -228,7 +248,7 @@ impl InterfaceInner {
 
     #[cfg(feature = "medium-ethernet")]
     pub(super) fn process_arp<'frame>(
-        &mut self,
+        &self,
         timestamp: Instant,
         eth_frame: &EthernetFrame<&'frame [u8]>,
     ) -> Option<EthernetPacket<'frame>> {
@@ -269,7 +289,7 @@ impl InterfaceInner {
                 // We fill from requests too because if someone is requesting our address they
                 // are probably going to talk to us, so we avoid having to request their address
                 // when we later reply to them.
-                self.neighbor_cache.fill(
+                self.neighbor_cache.lock().unwrap().fill(
                     source_protocol_addr.into(),
                     source_hardware_addr.into(),
                     timestamp,
@@ -293,10 +313,11 @@ impl InterfaceInner {
     }
 
     pub(super) fn process_icmpv4<'frame>(
-        &mut self,
-        _sockets: &mut SocketSet,
+        &self,
+        _sockets: &SocketSet,
         ip_repr: Ipv4Repr,
         ip_payload: &'frame [u8],
+        queue_id: usize,
     ) -> Option<Packet<'frame>> {
         let icmp_packet = check!(Icmpv4Packet::new_checked(ip_payload));
         let icmp_repr = check!(Icmpv4Repr::parse(&icmp_packet, &self.caps.checksum));
@@ -305,14 +326,23 @@ impl InterfaceInner {
         let mut handled_by_icmp_socket = false;
 
         #[cfg(all(feature = "socket-icmp", feature = "proto-ipv4"))]
-        for icmp_socket in _sockets
-            .items_mut()
-            .filter_map(|i| icmp::Socket::downcast_mut(&mut i.socket))
-        {
-            if icmp_socket.accepts_v4(self, &ip_repr, &icmp_repr) {
-                icmp_socket.process_v4(self, &ip_repr, &icmp_repr);
-                handled_by_icmp_socket = true;
+        for icmp_socket in _sockets.items() {
+            if let Some(socket) = icmp_socket.socket.try_read().ok() {
+                if let Some(socket) = icmp::Socket::downcast(&socket) {
+                    if !socket.accepts_v4(self, &ip_repr, &icmp_repr) {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
             }
+            icmp_socket.queue_id.store(queue_id, Relaxed);
+            let mut socket = icmp_socket.socket.write().unwrap();
+            let icmp_socket = icmp::Socket::downcast_mut(&mut socket).unwrap();
+            icmp_socket.process_v4(self, &ip_repr, &icmp_repr);
+            handled_by_icmp_socket = true;
         }
 
         match icmp_repr {
@@ -392,7 +422,7 @@ impl InterfaceInner {
     }
 
     #[cfg(feature = "proto-ipv4-fragmentation")]
-    pub(super) fn dispatch_ipv4_frag<Tx: TxToken>(&mut self, tx_token: Tx, frag: &mut Fragmenter) {
+    pub(super) fn dispatch_ipv4_frag<Tx: TxToken>(&self, tx_token: Tx, frag: &mut Fragmenter) {
         let caps = self.caps.clone();
 
         let mtu_max = self.ip_mtu();

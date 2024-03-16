@@ -53,33 +53,41 @@ impl<D: Device> Device for Tracer<D> {
         self.inner.capabilities()
     }
 
-    fn receive(&mut self, timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+    fn receive(
+        &self,
+        timestamp: Instant,
+        queue_id: usize,
+    ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         let medium = self.inner.capabilities().medium;
-        self.inner.receive(timestamp).map(|(rx_token, tx_token)| {
-            let rx = RxToken {
-                token: rx_token,
-                writer: self.writer,
-                medium,
-                timestamp,
-            };
-            let tx = TxToken {
-                token: tx_token,
-                writer: self.writer,
-                medium,
-                timestamp,
-            };
-            (rx, tx)
-        })
+        self.inner
+            .receive(timestamp, queue_id)
+            .map(|(rx_token, tx_token)| {
+                let rx = RxToken {
+                    token: rx_token,
+                    writer: self.writer,
+                    medium,
+                    timestamp,
+                };
+                let tx = TxToken {
+                    token: tx_token,
+                    writer: self.writer,
+                    medium,
+                    timestamp,
+                };
+                (rx, tx)
+            })
     }
 
-    fn transmit(&mut self, timestamp: Instant) -> Option<Self::TxToken<'_>> {
+    fn transmit(&self, timestamp: Instant, queue_id: usize) -> Option<Self::TxToken<'_>> {
         let medium = self.inner.capabilities().medium;
-        self.inner.transmit(timestamp).map(|tx_token| TxToken {
-            token: tx_token,
-            medium,
-            writer: self.writer,
-            timestamp,
-        })
+        self.inner
+            .transmit(timestamp, queue_id)
+            .map(|tx_token| TxToken {
+                token: tx_token,
+                medium,
+                writer: self.writer,
+                timestamp,
+            })
     }
 }
 

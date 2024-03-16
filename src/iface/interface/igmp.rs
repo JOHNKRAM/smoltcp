@@ -39,7 +39,7 @@ impl Interface {
     where
         D: Device + ?Sized,
     {
-        self.inner.now = timestamp;
+        // self.inner.now = timestamp;
 
         match addr.into() {
             IpAddress::Ipv4(addr) => {
@@ -55,12 +55,18 @@ impl Interface {
                 {
                     // Send initial membership report
                     let tx_token = device
-                        .transmit(timestamp)
+                        .transmit(timestamp, 0)
                         .ok_or(MulticastError::Exhausted)?;
 
                     // NOTE(unwrap): packet destination is multicast, which is always routable and doesn't require neighbor discovery.
                     self.inner
-                        .dispatch_ip(tx_token, PacketMeta::default(), pkt, &mut self.fragmenter)
+                        .dispatch_ip(
+                            tx_token,
+                            PacketMeta::default(),
+                            pkt,
+                            self.get_fragmenter_egress(0).unwrap().deref_mut(),
+                            timestamp,
+                        )
                         .unwrap();
 
                     Ok(true)
@@ -87,7 +93,7 @@ impl Interface {
     where
         D: Device + ?Sized,
     {
-        self.inner.now = timestamp;
+        // self.inner.now = timestamp;
 
         match addr.into() {
             IpAddress::Ipv4(addr) => {
@@ -97,12 +103,18 @@ impl Interface {
                 } else if let Some(pkt) = self.inner.igmp_leave_packet(addr) {
                     // Send group leave packet
                     let tx_token = device
-                        .transmit(timestamp)
+                        .transmit(timestamp, 0)
                         .ok_or(MulticastError::Exhausted)?;
 
                     // NOTE(unwrap): packet destination is multicast, which is always routable and doesn't require neighbor discovery.
                     self.inner
-                        .dispatch_ip(tx_token, PacketMeta::default(), pkt, &mut self.fragmenter)
+                        .dispatch_ip(
+                            tx_token,
+                            PacketMeta::default(),
+                            pkt,
+                            self.get_fragmenter_egress(0).unwrap().deref_mut(),
+                            timestamp,
+                        )
                         .unwrap();
 
                     Ok(true)
@@ -123,29 +135,36 @@ impl Interface {
 
     /// Depending on `igmp_report_state` and the therein contained
     /// timeouts, send IGMP membership reports.
-    pub(crate) fn igmp_egress<D>(&mut self, device: &mut D) -> bool
+    pub(crate) fn igmp_egress<D>(&self, device: &D, queue_id: usize, now: Instant) -> bool
     where
         D: Device + ?Sized,
     {
-        match self.inner.igmp_report_state {
+        let fragmenter_guard = self.get_fragmenter_egress(queue_id);
+        if fragmenter_guard.is_none() {
+            return false;
+        }
+        let mut fragmenter_guard = fragmenter_guard.unwrap();
+        let fragmenter = fragmenter_guard.deref_mut();
+        let mut igmp_report_state = self.inner.igmp_report_state.lock().unwrap();
+        match *igmp_report_state {
             IgmpReportState::ToSpecificQuery {
                 version,
                 timeout,
                 group,
-            } if self.inner.now >= timeout => {
+            } if now >= timeout => {
                 if let Some(pkt) = self.inner.igmp_report_packet(version, group) {
                     // Send initial membership report
-                    if let Some(tx_token) = device.transmit(self.inner.now) {
+                    if let Some(tx_token) = device.transmit(now, queue_id) {
                         // NOTE(unwrap): packet destination is multicast, which is always routable and doesn't require neighbor discovery.
                         self.inner
-                            .dispatch_ip(tx_token, PacketMeta::default(), pkt, &mut self.fragmenter)
+                            .dispatch_ip(tx_token, PacketMeta::default(), pkt, fragmenter, now)
                             .unwrap();
                     } else {
                         return false;
                     }
                 }
 
-                self.inner.igmp_report_state = IgmpReportState::Inactive;
+                *igmp_report_state = IgmpReportState::Inactive;
                 true
             }
             IgmpReportState::ToGeneralQuery {
@@ -153,7 +172,7 @@ impl Interface {
                 timeout,
                 interval,
                 next_index,
-            } if self.inner.now >= timeout => {
+            } if now >= timeout => {
                 let addr = self
                     .inner
                     .ipv4_multicast_groups
@@ -165,14 +184,15 @@ impl Interface {
                     Some(addr) => {
                         if let Some(pkt) = self.inner.igmp_report_packet(version, addr) {
                             // Send initial membership report
-                            if let Some(tx_token) = device.transmit(self.inner.now) {
+                            if let Some(tx_token) = device.transmit(now, queue_id) {
                                 // NOTE(unwrap): packet destination is multicast, which is always routable and doesn't require neighbor discovery.
                                 self.inner
                                     .dispatch_ip(
                                         tx_token,
                                         PacketMeta::default(),
                                         pkt,
-                                        &mut self.fragmenter,
+                                        fragmenter,
+                                        now,
                                     )
                                     .unwrap();
                             } else {
@@ -180,8 +200,8 @@ impl Interface {
                             }
                         }
 
-                        let next_timeout = (timeout + interval).max(self.inner.now);
-                        self.inner.igmp_report_state = IgmpReportState::ToGeneralQuery {
+                        let next_timeout = (timeout + interval).max(now);
+                        *igmp_report_state = IgmpReportState::ToGeneralQuery {
                             version,
                             timeout: next_timeout,
                             interval,
@@ -191,7 +211,7 @@ impl Interface {
                     }
 
                     None => {
-                        self.inner.igmp_report_state = IgmpReportState::Inactive;
+                        *igmp_report_state = IgmpReportState::Inactive;
                         false
                     }
                 }
@@ -208,9 +228,10 @@ impl InterfaceInner {
     /// Membership must not be reported immediately in order to avoid flooding the network
     /// after a query is broadcasted by a router; this is not currently done.
     pub(super) fn process_igmp<'frame>(
-        &mut self,
+        &self,
         ipv4_repr: Ipv4Repr,
         ip_payload: &'frame [u8],
+        now: Instant,
     ) -> Option<Packet<'frame>> {
         let igmp_packet = check!(IgmpPacket::new_checked(ip_payload));
         let igmp_repr = check!(IgmpRepr::parse(&igmp_packet));
@@ -238,9 +259,9 @@ impl InterfaceInner {
                                 max_resp_time / intervals
                             }
                         };
-                        self.igmp_report_state = IgmpReportState::ToGeneralQuery {
+                        *self.igmp_report_state.lock().unwrap() = IgmpReportState::ToGeneralQuery {
                             version,
-                            timeout: self.now + interval,
+                            timeout: now + interval,
                             interval,
                             next_index: 0,
                         };
@@ -250,11 +271,12 @@ impl InterfaceInner {
                     if self.has_multicast_group(group_addr) && ipv4_repr.dst_addr == group_addr {
                         // Don't respond immediately
                         let timeout = max_resp_time / 4;
-                        self.igmp_report_state = IgmpReportState::ToSpecificQuery {
-                            version,
-                            timeout: self.now + timeout,
-                            group: group_addr,
-                        };
+                        *self.igmp_report_state.lock().unwrap() =
+                            IgmpReportState::ToSpecificQuery {
+                                version,
+                                timeout: now + timeout,
+                                group: group_addr,
+                            };
                     }
                 }
             }

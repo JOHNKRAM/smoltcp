@@ -1,20 +1,21 @@
 use super::*;
+use core::sync::atomic::Ordering::Relaxed;
 
 impl InterfaceInner {
     /// Return the next IEEE802.15.4 sequence number.
     #[cfg(feature = "medium-ieee802154")]
-    pub(super) fn next_ieee802154_seq_number(&mut self) -> u8 {
-        let no = self.sequence_no;
-        self.sequence_no = self.sequence_no.wrapping_add(1);
-        no
+    pub(super) fn next_ieee802154_seq_number(&self) -> u8 {
+        self.sequence_no.fetch_add(1, Relaxed)
     }
 
     pub(super) fn process_ieee802154<'output, 'payload: 'output>(
-        &mut self,
-        sockets: &mut SocketSet,
+        &self,
+        sockets: &SocketSet,
         meta: PacketMeta,
         sixlowpan_payload: &'payload [u8],
         _fragments: &'output mut FragmentsBuffer,
+        queue_id: usize,
+        now: Instant,
     ) -> Option<Packet<'output>> {
         let ieee802154_frame = check!(Ieee802154Frame::new_checked(sixlowpan_payload));
 
@@ -39,15 +40,21 @@ impl InterfaceInner {
         }
 
         match ieee802154_frame.payload() {
-            Some(payload) => {
-                self.process_sixlowpan(sockets, meta, &ieee802154_repr, payload, _fragments)
-            }
+            Some(payload) => self.process_sixlowpan(
+                sockets,
+                meta,
+                &ieee802154_repr,
+                payload,
+                _fragments,
+                queue_id,
+                now,
+            ),
             None => None,
         }
     }
 
     pub(super) fn dispatch_ieee802154<Tx: TxToken>(
-        &mut self,
+        &self,
         ll_dst_a: Ieee802154Address,
         tx_token: Tx,
         meta: PacketMeta,
@@ -76,7 +83,7 @@ impl InterfaceInner {
 
     #[cfg(feature = "proto-sixlowpan-fragmentation")]
     pub(super) fn dispatch_ieee802154_frag<Tx: TxToken>(
-        &mut self,
+        &self,
         tx_token: Tx,
         frag: &mut Fragmenter,
     ) {

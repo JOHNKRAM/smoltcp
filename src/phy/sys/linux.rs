@@ -24,3 +24,4 @@ pub const TUNSETIFF: libc::c_ulong = if cfg!(any(
 pub const IFF_TUN: libc::c_int = 0x0001;
 pub const IFF_TAP: libc::c_int = 0x0002;
 pub const IFF_NO_PI: libc::c_int = 0x1000;
+pub const IFF_MULTI_QUEUE: libc::c_int = 0x0100;

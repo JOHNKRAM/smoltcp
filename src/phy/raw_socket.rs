@@ -74,7 +74,11 @@ impl Device for RawSocket {
         }
     }
 
-    fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+    fn receive(
+        &self,
+        _timestamp: Instant,
+        queue_id: usize,
+    ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         let mut lower = self.lower.borrow_mut();
         let mut buffer = vec![0; self.mtu];
         match lower.recv(&mut buffer[..]) {
@@ -91,7 +95,7 @@ impl Device for RawSocket {
         }
     }
 
-    fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
+    fn transmit(&self, _timestamp: Instant, queue_id: usize) -> Option<Self::TxToken<'_>> {
         Some(TxToken {
             lower: self.lower.clone(),
         })

@@ -1,4 +1,5 @@
 use super::*;
+use core::sync::atomic::Ordering::Relaxed;
 
 /// Enum used for the process_hopbyhop function. In some cases, when discarding a packet, an ICMMP
 /// parameter problem message needs to be transmitted to the source of the address. In other cases,
@@ -167,10 +168,12 @@ impl InterfaceInner {
     }
 
     pub(super) fn process_ipv6<'frame>(
-        &mut self,
-        sockets: &mut SocketSet,
+        &self,
+        sockets: &SocketSet,
         meta: PacketMeta,
         ipv6_packet: &Ipv6Packet<&'frame [u8]>,
+        queue_id: usize,
+        now: Instant,
     ) -> Option<Packet<'frame>> {
         let ipv6_repr = check!(Ipv6Repr::parse(ipv6_packet));
 
@@ -209,11 +212,13 @@ impl InterfaceInner {
             next_header,
             handled_by_raw_socket,
             ip_payload,
+            queue_id,
+            now,
         )
     }
 
     fn process_hopbyhop<'frame>(
-        &mut self,
+        &self,
         ipv6_repr: Ipv6Repr,
         ip_payload: &'frame [u8],
     ) -> HopByHopResponse<'frame> {
@@ -271,16 +276,20 @@ impl InterfaceInner {
     /// Given the next header value forward the payload onto the correct process
     /// function.
     fn process_nxt_hdr<'frame>(
-        &mut self,
-        sockets: &mut SocketSet,
+        &self,
+        sockets: &SocketSet,
         meta: PacketMeta,
         ipv6_repr: Ipv6Repr,
         nxt_hdr: IpProtocol,
         handled_by_raw_socket: bool,
         ip_payload: &'frame [u8],
+        queue_id: usize,
+        now: Instant,
     ) -> Option<Packet<'frame>> {
         match nxt_hdr {
-            IpProtocol::Icmpv6 => self.process_icmpv6(sockets, ipv6_repr, ip_payload),
+            IpProtocol::Icmpv6 => {
+                self.process_icmpv6(sockets, ipv6_repr, ip_payload, queue_id, now)
+            }
 
             #[cfg(any(feature = "socket-udp", feature = "socket-dns"))]
             IpProtocol::Udp => self.process_udp(
@@ -289,10 +298,13 @@ impl InterfaceInner {
                 handled_by_raw_socket,
                 ipv6_repr.into(),
                 ip_payload,
+                queue_id,
             ),
 
             #[cfg(feature = "socket-tcp")]
-            IpProtocol::Tcp => self.process_tcp(sockets, ipv6_repr.into(), ip_payload),
+            IpProtocol::Tcp => {
+                self.process_tcp(sockets, ipv6_repr.into(), ip_payload, queue_id, now)
+            }
 
             #[cfg(feature = "socket-raw")]
             _ if handled_by_raw_socket => None,
@@ -314,10 +326,12 @@ impl InterfaceInner {
     }
 
     pub(super) fn process_icmpv6<'frame>(
-        &mut self,
-        _sockets: &mut SocketSet,
+        &self,
+        _sockets: &SocketSet,
         ip_repr: Ipv6Repr,
         ip_payload: &'frame [u8],
+        queue_id: usize,
+        now: Instant,
     ) -> Option<Packet<'frame>> {
         let icmp_packet = check!(Icmpv6Packet::new_checked(ip_payload));
         let icmp_repr = check!(Icmpv6Repr::parse(
@@ -333,14 +347,23 @@ impl InterfaceInner {
         #[cfg(feature = "socket-icmp")]
         {
             use crate::socket::icmp::Socket as IcmpSocket;
-            for icmp_socket in _sockets
-                .items_mut()
-                .filter_map(|i| IcmpSocket::downcast_mut(&mut i.socket))
-            {
-                if icmp_socket.accepts_v6(self, &ip_repr, &icmp_repr) {
-                    icmp_socket.process_v6(self, &ip_repr, &icmp_repr);
-                    handled_by_icmp_socket = true;
+            for icmp_socket in _sockets.items() {
+                if let Some(socket) = icmp_socket.socket.try_read().ok() {
+                    if let Some(socket) = IcmpSocket::downcast(&socket) {
+                        if !socket.accepts_v6(self, &ip_repr, &icmp_repr) {
+                            continue;
+                        }
+                    } else {
+                        continue;
+                    }
+                } else {
+                    continue;
                 }
+                icmp_socket.queue_id.store(queue_id, Relaxed);
+                let mut socket = icmp_socket.socket.write().unwrap();
+                let icmp_socket = IcmpSocket::downcast_mut(&mut socket).unwrap();
+                icmp_socket.process_v6(self, &ip_repr, &icmp_repr);
+                handled_by_icmp_socket = true;
             }
         }
 
@@ -366,9 +389,9 @@ impl InterfaceInner {
             #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
             Icmpv6Repr::Ndisc(repr) if ip_repr.hop_limit == 0xff => match self.caps.medium {
                 #[cfg(feature = "medium-ethernet")]
-                Medium::Ethernet => self.process_ndisc(ip_repr, repr),
+                Medium::Ethernet => self.process_ndisc(ip_repr, repr, now),
                 #[cfg(feature = "medium-ieee802154")]
-                Medium::Ieee802154 => self.process_ndisc(ip_repr, repr),
+                Medium::Ieee802154 => self.process_ndisc(ip_repr, repr, now),
                 #[cfg(feature = "medium-ip")]
                 Medium::Ip => None,
             },
@@ -385,9 +408,10 @@ impl InterfaceInner {
 
     #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
     pub(super) fn process_ndisc<'frame>(
-        &mut self,
+        &self,
         ip_repr: Ipv6Repr,
         repr: NdiscRepr<'frame>,
+        now: Instant,
     ) -> Option<Packet<'frame>> {
         match repr {
             NdiscRepr::NeighborAdvert {
@@ -401,10 +425,11 @@ impl InterfaceInner {
                     if !lladdr.is_unicast() || !target_addr.is_unicast() {
                         return None;
                     }
+                    let mut neighbor_cache = self.neighbor_cache.lock().unwrap();
                     if flags.contains(NdiscNeighborFlags::OVERRIDE)
-                        || !self.neighbor_cache.lookup(&ip_addr, self.now).found()
+                        || !neighbor_cache.lookup(&ip_addr, now).found()
                     {
-                        self.neighbor_cache.fill(ip_addr, lladdr, self.now)
+                        neighbor_cache.fill(ip_addr, lladdr, now)
                     }
                 }
                 None
@@ -420,7 +445,9 @@ impl InterfaceInner {
                         return None;
                     }
                     self.neighbor_cache
-                        .fill(ip_repr.src_addr.into(), lladdr, self.now);
+                        .lock()
+                        .unwrap()
+                        .fill(ip_repr.src_addr.into(), lladdr, now);
                 }
 
                 if self.has_solicited_node(ip_repr.dst_addr) && self.has_ip_addr(target_addr) {

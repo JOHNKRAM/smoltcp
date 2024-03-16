@@ -413,7 +413,7 @@ pub struct Socket<'a> {
     hop_limit: Option<u8>,
     /// Address passed to listen(). Listen address is set when listen() is called and
     /// used every time the socket is reset back to the LISTEN state.
-    listen_endpoint: IpListenEndpoint,
+    pub listen_endpoint: IpListenEndpoint,
     /// Current 4-tuple (local and remote endpoints).
     tuple: Option<Tuple>,
     /// The sequence number corresponding to the beginning of the transmit buffer.
@@ -875,13 +875,14 @@ impl<'a> Socket<'a> {
     }
 
     #[cfg(test)]
-    fn random_seq_no(_cx: &mut Context) -> TcpSeqNumber {
+    fn random_seq_no(_cx: &Context) -> TcpSeqNumber {
         TcpSeqNumber(10000)
     }
 
     #[cfg(not(test))]
-    fn random_seq_no(cx: &mut Context) -> TcpSeqNumber {
-        TcpSeqNumber(cx.rand().rand_u32() as i32)
+    fn random_seq_no(cx: &Context) -> TcpSeqNumber {
+        // TcpSeqNumber(cx.rand().rand_u32() as i32)
+        TcpSeqNumber(10000)
     }
 
     /// Close the transmit half of the full-duplex connection.
@@ -1320,21 +1321,22 @@ impl<'a> Socket<'a> {
 
     fn challenge_ack_reply(
         &mut self,
-        cx: &mut Context,
+        cx: &Context,
         ip_repr: &IpRepr,
         repr: &TcpRepr,
+        now: Instant,
     ) -> Option<(IpRepr, TcpRepr<'static>)> {
-        if cx.now() < self.challenge_ack_timer {
+        if now < self.challenge_ack_timer {
             return None;
         }
 
         // Rate-limit to 1 per second max.
-        self.challenge_ack_timer = cx.now() + Duration::from_secs(1);
+        self.challenge_ack_timer = now + Duration::from_secs(1);
 
         Some(self.ack_reply(ip_repr, repr))
     }
 
-    pub(crate) fn accepts(&self, _cx: &mut Context, ip_repr: &IpRepr, repr: &TcpRepr) -> bool {
+    pub(crate) fn accepts(&self, _cx: &Context, ip_repr: &IpRepr, repr: &TcpRepr) -> bool {
         if self.state == State::Closed {
             return false;
         }
@@ -1364,9 +1366,10 @@ impl<'a> Socket<'a> {
 
     pub(crate) fn process(
         &mut self,
-        cx: &mut Context,
+        cx: &Context,
         ip_repr: &IpRepr,
         repr: &TcpRepr,
+        now: Instant,
     ) -> Option<(IpRepr, TcpRepr<'static>)> {
         debug_assert!(self.accepts(cx, ip_repr, repr));
 
@@ -1474,7 +1477,7 @@ impl<'a> Socket<'a> {
                         ack_min,
                         ack_max
                     );
-                    return self.challenge_ack_reply(cx, ip_repr, repr);
+                    return self.challenge_ack_reply(cx, ip_repr, repr, now);
                 }
             }
         }
@@ -1558,10 +1561,10 @@ impl<'a> Socket<'a> {
                     // If we're in the TIME-WAIT state, restart the TIME-WAIT timeout, since
                     // the remote end may not have realized we've closed the connection.
                     if self.state == State::TimeWait {
-                        self.timer.set_for_close(cx.now());
+                        self.timer.set_for_close(now);
                     }
 
-                    return self.challenge_ack_reply(cx, ip_repr, repr);
+                    return self.challenge_ack_reply(cx, ip_repr, repr, now);
                 }
             }
         };
@@ -1592,7 +1595,7 @@ impl<'a> Socket<'a> {
                     ack_all = self.remote_last_seq == ack_number
                 }
 
-                self.rtte.on_ack(cx.now(), ack_number);
+                self.rtte.on_ack(now, ack_number);
             }
         }
 
@@ -1653,13 +1656,13 @@ impl<'a> Socket<'a> {
                     self.remote_win_shift = 0;
                 }
                 self.set_state(State::SynReceived);
-                self.timer.set_for_idle(cx.now(), self.keep_alive);
+                self.timer.set_for_idle(now, self.keep_alive);
             }
 
             // ACK packets in the SYN-RECEIVED state change it to ESTABLISHED.
             (State::SynReceived, TcpControl::None) => {
                 self.set_state(State::Established);
-                self.timer.set_for_idle(cx.now(), self.keep_alive);
+                self.timer.set_for_idle(now, self.keep_alive);
             }
 
             // FIN packets in the SYN-RECEIVED state change it to CLOSE-WAIT.
@@ -1669,7 +1672,7 @@ impl<'a> Socket<'a> {
                 self.remote_seq_no += 1;
                 self.rx_fin_received = true;
                 self.set_state(State::CloseWait);
-                self.timer.set_for_idle(cx.now(), self.keep_alive);
+                self.timer.set_for_idle(now, self.keep_alive);
             }
 
             // SYN|ACK packets in the SYN-SENT state change it to ESTABLISHED.
@@ -1693,14 +1696,14 @@ impl<'a> Socket<'a> {
                 }
 
                 self.set_state(State::Established);
-                self.timer.set_for_idle(cx.now(), self.keep_alive);
+                self.timer.set_for_idle(now, self.keep_alive);
             }
 
             // ACK packets in ESTABLISHED state reset the retransmit timer,
             // except for duplicate ACK packets which preserve it.
             (State::Established, TcpControl::None) => {
                 if !self.timer.is_retransmit() || ack_all {
-                    self.timer.set_for_idle(cx.now(), self.keep_alive);
+                    self.timer.set_for_idle(now, self.keep_alive);
                 }
             }
 
@@ -1709,7 +1712,7 @@ impl<'a> Socket<'a> {
                 self.remote_seq_no += 1;
                 self.rx_fin_received = true;
                 self.set_state(State::CloseWait);
-                self.timer.set_for_idle(cx.now(), self.keep_alive);
+                self.timer.set_for_idle(now, self.keep_alive);
             }
 
             // ACK packets in FIN-WAIT-1 state change it to FIN-WAIT-2, if we've already
@@ -1719,7 +1722,7 @@ impl<'a> Socket<'a> {
                     self.set_state(State::FinWait2);
                 }
                 if ack_all {
-                    self.timer.set_for_idle(cx.now(), self.keep_alive);
+                    self.timer.set_for_idle(now, self.keep_alive);
                 }
             }
 
@@ -1730,16 +1733,16 @@ impl<'a> Socket<'a> {
                 self.rx_fin_received = true;
                 if ack_of_fin {
                     self.set_state(State::TimeWait);
-                    self.timer.set_for_close(cx.now());
+                    self.timer.set_for_close(now);
                 } else {
                     self.set_state(State::Closing);
-                    self.timer.set_for_idle(cx.now(), self.keep_alive);
+                    self.timer.set_for_idle(now, self.keep_alive);
                 }
             }
 
             // Data packets in FIN-WAIT-2 reset the idle timer.
             (State::FinWait2, TcpControl::None) => {
-                self.timer.set_for_idle(cx.now(), self.keep_alive);
+                self.timer.set_for_idle(now, self.keep_alive);
             }
 
             // FIN packets in FIN-WAIT-2 state change it to TIME-WAIT.
@@ -1747,22 +1750,22 @@ impl<'a> Socket<'a> {
                 self.remote_seq_no += 1;
                 self.rx_fin_received = true;
                 self.set_state(State::TimeWait);
-                self.timer.set_for_close(cx.now());
+                self.timer.set_for_close(now);
             }
 
             // ACK packets in CLOSING state change it to TIME-WAIT.
             (State::Closing, TcpControl::None) => {
                 if ack_of_fin {
                     self.set_state(State::TimeWait);
-                    self.timer.set_for_close(cx.now());
+                    self.timer.set_for_close(now);
                 } else {
-                    self.timer.set_for_idle(cx.now(), self.keep_alive);
+                    self.timer.set_for_idle(now, self.keep_alive);
                 }
             }
 
             // ACK packets in CLOSE-WAIT state reset the retransmit timer.
             (State::CloseWait, TcpControl::None) => {
-                self.timer.set_for_idle(cx.now(), self.keep_alive);
+                self.timer.set_for_idle(now, self.keep_alive);
             }
 
             // ACK packets in LAST-ACK state change it to CLOSED.
@@ -1772,7 +1775,7 @@ impl<'a> Socket<'a> {
                     self.set_state(State::Closed);
                     self.tuple = None;
                 } else {
-                    self.timer.set_for_idle(cx.now(), self.keep_alive);
+                    self.timer.set_for_idle(now, self.keep_alive);
                 }
             }
 
@@ -1783,7 +1786,7 @@ impl<'a> Socket<'a> {
         }
 
         // Update remote state.
-        self.remote_last_ts = Some(cx.now());
+        self.remote_last_ts = Some(now);
 
         // RFC 1323: The window field (SEG.WND) in the header of every incoming segment, with the
         // exception of SYN segments, is left-shifted by Snd.Wind.Scale bits before updating SND.WND.
@@ -1924,7 +1927,7 @@ impl<'a> Socket<'a> {
                     AckDelayTimer::Idle => {
                         tcp_trace!("starting delayed ack timer");
 
-                        AckDelayTimer::Waiting(cx.now() + ack_delay)
+                        AckDelayTimer::Waiting(now + ack_delay)
                     }
                     // RFC1122 says "in a stream of full-sized segments there SHOULD be an ACK
                     // for at least every second segment".
@@ -1962,7 +1965,7 @@ impl<'a> Socket<'a> {
         }
     }
 
-    fn seq_to_transmit(&self, cx: &mut Context) -> bool {
+    fn seq_to_transmit(&self, cx: &Context) -> bool {
         let ip_header_len = match self.tuple.unwrap().local.addr {
             #[cfg(feature = "proto-ipv4")]
             IpAddress::Ipv4(_) => crate::wire::IPV4_HEADER_LEN,
@@ -2053,9 +2056,9 @@ impl<'a> Socket<'a> {
         }
     }
 
-    pub(crate) fn dispatch<F, E>(&mut self, cx: &mut Context, emit: F) -> Result<(), E>
+    pub(crate) fn dispatch<F, E>(&mut self, cx: &Context, emit: F, now: Instant) -> Result<(), E>
     where
-        F: FnOnce(&mut Context, (IpRepr, TcpRepr)) -> Result<(), E>,
+        F: FnOnce(&Context, (IpRepr, TcpRepr)) -> Result<(), E>,
     {
         if self.tuple.is_none() {
             return Ok(());
@@ -2069,16 +2072,16 @@ impl<'a> Socket<'a> {
             // period of time, it isn't anymore, and the local endpoint is talking.
             // So, we start counting the timeout not from the last received packet
             // but from the first transmitted one.
-            self.remote_last_ts = Some(cx.now());
+            self.remote_last_ts = Some(now);
         }
 
         // Check if any state needs to be changed because of a timer.
-        if self.timed_out(cx.now()) {
+        if self.timed_out(now) {
             // If a timeout expires, we should abort the connection.
             net_debug!("timeout exceeded");
             self.set_state(State::Closed);
         } else if !self.seq_to_transmit(cx) {
-            if let Some(retransmit_delta) = self.timer.should_retransmit(cx.now()) {
+            if let Some(retransmit_delta) = self.timer.should_retransmit(now) {
                 // If a retransmit timer expired, we should resend data starting at the last ACK.
                 net_debug!("retransmitting at t+{}", retransmit_delta);
 
@@ -2091,7 +2094,7 @@ impl<'a> Socket<'a> {
                 // now for whatever reason (like zero window), this avoids an
                 // infinite polling loop where `poll_at` returns `Now` but `dispatch`
                 // can't actually do anything.
-                self.timer.set_for_idle(cx.now(), self.keep_alive);
+                self.timer.set_for_idle(now, self.keep_alive);
 
                 // Inform RTTE, so that it can avoid bogus measurements.
                 self.rtte.on_retransmit();
@@ -2102,19 +2105,19 @@ impl<'a> Socket<'a> {
         if self.seq_to_transmit(cx) {
             // If we have data to transmit and it fits into partner's window, do it.
             tcp_trace!("outgoing segment will send data or flags");
-        } else if self.ack_to_transmit() && self.delayed_ack_expired(cx.now()) {
+        } else if self.ack_to_transmit() && self.delayed_ack_expired(now) {
             // If we have data to acknowledge, do it.
             tcp_trace!("outgoing segment will acknowledge");
-        } else if self.window_to_update() && self.delayed_ack_expired(cx.now()) {
+        } else if self.window_to_update() && self.delayed_ack_expired(now) {
             // If we have window length increase to advertise, do it.
             tcp_trace!("outgoing segment will update window");
         } else if self.state == State::Closed {
             // If we need to abort the connection, do it.
             tcp_trace!("outgoing segment will abort connection");
-        } else if self.timer.should_keep_alive(cx.now()) {
+        } else if self.timer.should_keep_alive(now) {
             // If we need to transmit a keep-alive packet, do it.
             tcp_trace!("keep-alive timer expired");
-        } else if self.timer.should_close(cx.now()) {
+        } else if self.timer.should_close(now) {
             // If we have spent enough time in the TIME-WAIT state, close the socket.
             tcp_trace!("TIME-WAIT timer expired");
             self.reset();
@@ -2238,7 +2241,7 @@ impl<'a> Socket<'a> {
         // sequence space will elicit an ACK, we only need to send an explicit packet if we
         // couldn't fill the sequence space with anything.
         let is_keep_alive;
-        if self.timer.should_keep_alive(cx.now()) && repr.is_empty() {
+        if self.timer.should_keep_alive(now) && repr.is_empty() {
             repr.seq_number = repr.seq_number - 1;
             repr.payload = b"\x00"; // RFC 1122 says we should do this
             is_keep_alive = true;
@@ -2287,7 +2290,7 @@ impl<'a> Socket<'a> {
 
         // We've sent something, whether useful data or a keep-alive packet, so rewind
         // the keep-alive timer.
-        self.timer.rewind_keep_alive(cx.now(), self.keep_alive);
+        self.timer.rewind_keep_alive(now, self.keep_alive);
 
         // Reset delayed-ack timer
         match self.ack_delay_timer {
@@ -2313,15 +2316,14 @@ impl<'a> Socket<'a> {
         self.remote_last_win = repr.window_len;
 
         if repr.segment_len() > 0 {
-            self.rtte
-                .on_send(cx.now(), repr.seq_number + repr.segment_len());
+            self.rtte.on_send(now, repr.seq_number + repr.segment_len());
         }
 
         if !self.seq_to_transmit(cx) && repr.segment_len() > 0 {
             // If we've transmitted all data we could (and there was something at all,
             // data or flag, to transmit, not just an ACK), wind up the retransmit timer.
             self.timer
-                .set_for_retransmit(cx.now(), self.rtte.retransmission_timeout());
+                .set_for_retransmit(now, self.rtte.retransmission_timeout());
         }
 
         if self.state == State::Closed {
@@ -2338,7 +2340,7 @@ impl<'a> Socket<'a> {
     }
 
     #[allow(clippy::if_same_then_else)]
-    pub(crate) fn poll_at(&self, cx: &mut Context) -> PollAt {
+    pub(crate) fn poll_at(&self, cx: &Context) -> PollAt {
         // The logic here mirrors the beginning of dispatch() closely.
         if self.tuple.is_none() {
             // No one to talk to, nothing to transmit.
@@ -2537,7 +2539,10 @@ mod test {
 
         assert!(socket.socket.accepts(&mut socket.cx, &ip_repr, repr));
 
-        match socket.socket.process(&mut socket.cx, &ip_repr, repr) {
+        match socket
+            .socket
+            .process(&mut socket.cx, &ip_repr, repr, timestamp)
+        {
             Some((_ip_repr, repr)) => {
                 net_trace!("recv: {}", repr);
                 Some(repr)
@@ -2553,9 +2558,9 @@ mod test {
         socket.cx.set_now(timestamp);
 
         let mut sent = 0;
-        let result = socket
-            .socket
-            .dispatch(&mut socket.cx, |_, (ip_repr, tcp_repr)| {
+        let result = socket.socket.dispatch(
+            &mut socket.cx,
+            |_, (ip_repr, tcp_repr)| {
                 assert_eq!(ip_repr.next_header(), IpProtocol::Tcp);
                 assert_eq!(ip_repr.src_addr(), LOCAL_ADDR.into());
                 assert_eq!(ip_repr.dst_addr(), REMOTE_ADDR.into());
@@ -2564,7 +2569,9 @@ mod test {
                 net_trace!("recv: {}", tcp_repr);
                 sent += 1;
                 Ok(f(Ok(tcp_repr)))
-            });
+            },
+            timestamp,
+        );
         match result {
             Ok(()) => assert_eq!(sent, 1, "Exactly one packet should be sent"),
             Err(e) => f(Err(e)),
@@ -2574,11 +2581,11 @@ mod test {
     fn recv_nothing(socket: &mut TestSocket, timestamp: Instant) {
         socket.cx.set_now(timestamp);
 
-        let result: Result<(), ()> = socket
-            .socket
-            .dispatch(&mut socket.cx, |_, (_ip_repr, _tcp_repr)| {
-                panic!("Should not send a packet")
-            });
+        let result: Result<(), ()> = socket.socket.dispatch(
+            &mut socket.cx,
+            |_, (_ip_repr, _tcp_repr)| panic!("Should not send a packet"),
+            timestamp,
+        );
 
         assert_eq!(result, Ok(()))
     }
@@ -6600,10 +6607,14 @@ mod test {
 
         s.set_hop_limit(Some(0x2a));
         assert_eq!(
-            s.socket.dispatch(&mut s.cx, |_, (ip_repr, _)| {
-                assert_eq!(ip_repr.hop_limit(), 0x2a);
-                Ok::<_, ()>(())
-            }),
+            s.socket.dispatch(
+                &mut s.cx,
+                |_, (ip_repr, _)| {
+                    assert_eq!(ip_repr.hop_limit(), 0x2a);
+                    Ok::<_, ()>(())
+                },
+                Instant::ZERO
+            ),
             Ok(())
         );
 

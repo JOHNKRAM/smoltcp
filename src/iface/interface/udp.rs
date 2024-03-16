@@ -1,4 +1,5 @@
 use super::*;
+use core::sync::atomic::Ordering::Relaxed;
 
 #[cfg(feature = "socket-dns")]
 use crate::socket::dns::Socket as DnsSocket;
@@ -8,12 +9,13 @@ use crate::socket::udp::Socket as UdpSocket;
 
 impl InterfaceInner {
     pub(super) fn process_udp<'frame>(
-        &mut self,
-        sockets: &mut SocketSet,
+        &self,
+        sockets: &SocketSet,
         meta: PacketMeta,
         handled_by_raw_socket: bool,
         ip_repr: IpRepr,
         ip_payload: &'frame [u8],
+        queue_id: usize,
     ) -> Option<Packet<'frame>> {
         let (src_addr, dst_addr) = (ip_repr.src_addr(), ip_repr.dst_addr());
         let udp_packet = check!(UdpPacket::new_checked(ip_payload));
@@ -25,25 +27,43 @@ impl InterfaceInner {
         ));
 
         #[cfg(feature = "socket-udp")]
-        for udp_socket in sockets
-            .items_mut()
-            .filter_map(|i| UdpSocket::downcast_mut(&mut i.socket))
-        {
-            if udp_socket.accepts(self, &ip_repr, &udp_repr) {
-                udp_socket.process(self, meta, &ip_repr, &udp_repr, udp_packet.payload());
-                return None;
+        for udp_socket in sockets.items() {
+            if let Some(socket) = udp_socket.socket.try_read().ok() {
+                if let Some(socket) = UdpSocket::downcast(&socket) {
+                    if !socket.accepts(self, &ip_repr, &udp_repr) {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
             }
+            udp_socket.queue_id.store(queue_id, Relaxed);
+            let mut socket = udp_socket.socket.write().unwrap();
+            let udp_socket = UdpSocket::downcast_mut(&mut socket).unwrap();
+            udp_socket.process(self, meta, &ip_repr, &udp_repr, udp_packet.payload());
+            return None;
         }
 
         #[cfg(feature = "socket-dns")]
-        for dns_socket in sockets
-            .items_mut()
-            .filter_map(|i| DnsSocket::downcast_mut(&mut i.socket))
-        {
-            if dns_socket.accepts(&ip_repr, &udp_repr) {
-                dns_socket.process(self, &ip_repr, &udp_repr, udp_packet.payload());
-                return None;
+        for dns_socket in sockets.items() {
+            if let Some(socket) = dns_socket.socket.try_read().ok() {
+                if let Some(socket) = DnsSocket::downcast(&socket) {
+                    if !socket.accepts(&ip_repr, &udp_repr) {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
             }
+            dns_socket.queue_id.store(queue_id, Relaxed);
+            let mut socket = dns_socket.socket.write().unwrap();
+            let dns_socket = UdpSocket::downcast_mut(&mut socket).unwrap();
+            dns_socket.process(self, meta, &ip_repr, &udp_repr, udp_packet.payload());
+            return None;
         }
 
         // The packet wasn't handled by a socket, send an ICMP port unreachable packet.

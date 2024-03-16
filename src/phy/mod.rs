@@ -352,13 +352,17 @@ pub trait Device {
     ///
     /// The timestamp must be a number of milliseconds, monotonically increasing since an
     /// arbitrary moment in time, such as system startup.
-    fn receive(&mut self, timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)>;
+    fn receive(
+        &self,
+        timestamp: Instant,
+        queue_id: usize,
+    ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)>;
 
     /// Construct a transmit token.
     ///
     /// The timestamp must be a number of milliseconds, monotonically increasing since an
     /// arbitrary moment in time, such as system startup.
-    fn transmit(&mut self, timestamp: Instant) -> Option<Self::TxToken<'_>>;
+    fn transmit(&self, timestamp: Instant, queue_id: usize) -> Option<Self::TxToken<'_>>;
 
     /// Get a description of device capabilities.
     fn capabilities(&self) -> DeviceCapabilities;

@@ -299,7 +299,7 @@ on Linux it is possible to create a _persistent tap interface_ that can be manip
 a specific user:
 
 ```sh
-sudo ip tuntap add name tap0 mode tap user $USER
+sudo ip tuntap add name tap0 mode tap user $USER multi_queue
 sudo ip link set tap0 up
 sudo ip addr add 192.168.69.100/24 dev tap0
 sudo ip -6 addr add fe80::100/64 dev tap0

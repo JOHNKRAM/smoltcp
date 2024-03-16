@@ -61,25 +61,33 @@ where
         caps
     }
 
-    fn receive(&mut self, timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        self.inner.receive(timestamp).map(|(rx_token, tx_token)| {
-            let rx = RxToken {
-                fuzzer: &mut self.fuzz_rx,
-                token: rx_token,
-            };
-            let tx = TxToken {
-                fuzzer: &mut self.fuzz_tx,
-                token: tx_token,
-            };
-            (rx, tx)
-        })
+    fn receive(
+        &self,
+        timestamp: Instant,
+        queue_id: usize,
+    ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+        self.inner
+            .receive(timestamp, queue_id)
+            .map(|(rx_token, tx_token)| {
+                let rx = RxToken {
+                    fuzzer: &self.fuzz_rx,
+                    token: rx_token,
+                };
+                let tx = TxToken {
+                    fuzzer: &self.fuzz_tx,
+                    token: tx_token,
+                };
+                (rx, tx)
+            })
     }
 
-    fn transmit(&mut self, timestamp: Instant) -> Option<Self::TxToken<'_>> {
-        self.inner.transmit(timestamp).map(|token| TxToken {
-            fuzzer: &mut self.fuzz_tx,
-            token: token,
-        })
+    fn transmit(&self, timestamp: Instant, queue_id: usize) -> Option<Self::TxToken<'_>> {
+        self.inner
+            .transmit(timestamp, queue_id)
+            .map(|token| TxToken {
+                fuzzer: &self.fuzz_tx,
+                token: token,
+            })
     }
 }
 

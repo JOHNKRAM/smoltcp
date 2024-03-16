@@ -287,7 +287,7 @@ impl<'a> Socket<'a> {
         self.client_port = client_port;
     }
 
-    pub(crate) fn poll_at(&self, _cx: &mut Context) -> PollAt {
+    pub(crate) fn poll_at(&self, _cx: &Context) -> PollAt {
         let t = match &self.state {
             ClientState::Discovering(state) => state.retry_at,
             ClientState::Requesting(state) => state.retry_at,
@@ -303,10 +303,11 @@ impl<'a> Socket<'a> {
 
     pub(crate) fn process(
         &mut self,
-        cx: &mut Context,
+        cx: &Context,
         ip_repr: &Ipv4Repr,
         repr: &UdpRepr,
         payload: &[u8],
+        now: Instant,
     ) {
         let src_ip = ip_repr.src_addr;
 
@@ -371,7 +372,7 @@ impl<'a> Socket<'a> {
                 }
 
                 self.state = ClientState::Requesting(RequestState {
-                    retry_at: cx.now(),
+                    retry_at: now,
                     retry: 0,
                     server: ServerInfo {
                         address: src_ip,
@@ -382,7 +383,7 @@ impl<'a> Socket<'a> {
             }
             (ClientState::Requesting(state), DhcpMessageType::Ack) => {
                 if let Some((config, renew_at, rebind_at, expires_at)) =
-                    Self::parse_ack(cx.now(), &dhcp_repr, self.max_lease_duration, state.server)
+                    Self::parse_ack(now, &dhcp_repr, self.max_lease_duration, state.server)
                 {
                     self.state = ClientState::Renewing(RenewState {
                         config,
@@ -401,7 +402,7 @@ impl<'a> Socket<'a> {
             }
             (ClientState::Renewing(state), DhcpMessageType::Ack) => {
                 if let Some((config, renew_at, rebind_at, expires_at)) = Self::parse_ack(
-                    cx.now(),
+                    now,
                     &dhcp_repr,
                     self.max_lease_duration,
                     state.config.server,
@@ -538,18 +539,19 @@ impl<'a> Socket<'a> {
     }
 
     #[cfg(not(test))]
-    fn random_transaction_id(cx: &mut Context) -> u32 {
-        cx.rand().rand_u32()
-    }
-
-    #[cfg(test)]
-    fn random_transaction_id(_cx: &mut Context) -> u32 {
+    fn random_transaction_id(cx: &Context) -> u32 {
+        // cx.rand().rand_u32()
         0x12345678
     }
 
-    pub(crate) fn dispatch<F, E>(&mut self, cx: &mut Context, emit: F) -> Result<(), E>
+    #[cfg(test)]
+    fn random_transaction_id(_cx: &Context) -> u32 {
+        0x12345678
+    }
+
+    pub(crate) fn dispatch<F, E>(&mut self, cx: &Context, emit: F, now: Instant) -> Result<(), E>
     where
-        F: FnOnce(&mut Context, (Ipv4Repr, UdpRepr, DhcpRepr)) -> Result<(), E>,
+        F: FnOnce(&Context, (Ipv4Repr, UdpRepr, DhcpRepr)) -> Result<(), E>,
     {
         // note: Dhcpv4Socket is only usable in ethernet mediums, so the
         // unwrap can never fail.
@@ -607,7 +609,7 @@ impl<'a> Socket<'a> {
 
         match &mut self.state {
             ClientState::Discovering(state) => {
-                if cx.now() < state.retry_at {
+                if now < state.retry_at {
                     return Ok(());
                 }
 
@@ -621,12 +623,12 @@ impl<'a> Socket<'a> {
                 emit(cx, (ipv4_repr, udp_repr, dhcp_repr))?;
 
                 // Update state AFTER the packet has been successfully sent.
-                state.retry_at = cx.now() + self.retry_config.discover_timeout;
+                state.retry_at = now + self.retry_config.discover_timeout;
                 self.transaction_id = next_transaction_id;
                 Ok(())
             }
             ClientState::Requesting(state) => {
-                if cx.now() < state.retry_at {
+                if now < state.retry_at {
                     return Ok(());
                 }
 
@@ -649,15 +651,15 @@ impl<'a> Socket<'a> {
                 emit(cx, (ipv4_repr, udp_repr, dhcp_repr))?;
 
                 // Exponential backoff: Double every 2 retries.
-                state.retry_at = cx.now()
-                    + (self.retry_config.initial_request_timeout << (state.retry as u32 / 2));
+                state.retry_at =
+                    now + (self.retry_config.initial_request_timeout << (state.retry as u32 / 2));
                 state.retry += 1;
 
                 self.transaction_id = next_transaction_id;
                 Ok(())
             }
             ClientState::Renewing(state) => {
-                let now = cx.now();
+                let now = now;
                 if state.expires_at <= now {
                     net_debug!("DHCP lease expired");
                     self.reset();
@@ -821,7 +823,8 @@ mod test {
             .emit(&mut DhcpPacket::new_unchecked(&mut payload))
             .unwrap();
 
-        s.socket.process(&mut s.cx, &ip_repr, &udp_repr, &payload)
+        s.socket
+            .process(&mut s.cx, &ip_repr, &udp_repr, &payload, timestamp)
     }
 
     fn recv(s: &mut TestSocket, timestamp: Instant, reprs: &[(Ipv4Repr, UdpRepr, DhcpRepr)]) {
@@ -830,9 +833,9 @@ mod test {
         let mut i = 0;
 
         while s.socket.poll_at(&mut s.cx) <= PollAt::Time(timestamp) {
-            let _ = s
-                .socket
-                .dispatch(&mut s.cx, |_, (mut ip_repr, udp_repr, dhcp_repr)| {
+            let _ = s.socket.dispatch(
+                &mut s.cx,
+                |_, (mut ip_repr, udp_repr, dhcp_repr)| {
                     assert_eq!(ip_repr.next_header, IpProtocol::Udp);
                     assert_eq!(
                         ip_repr.payload_len,
@@ -853,7 +856,9 @@ mod test {
                     }
                     i += 1;
                     Ok::<_, ()>(())
-                });
+                },
+                timestamp,
+            );
         }
 
         assert_eq!(i, reprs.len());

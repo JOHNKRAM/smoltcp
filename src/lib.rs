@@ -126,6 +126,8 @@ compile_error!("You must enable at most one of the following features: defmt, lo
 
 #[macro_use]
 mod macros;
+#[cfg(not(feature = "std"))]
+mod mutex;
 mod parsers;
 mod rand;
 
@@ -140,6 +142,7 @@ pub mod config {
     pub const IFACE_MAX_ADDR_COUNT: usize = 8;
     pub const IFACE_MAX_MULTICAST_GROUP_COUNT: usize = 4;
     pub const IFACE_MAX_ROUTE_COUNT: usize = 4;
+    pub const QUEUE_COUNT: usize = 1;
     pub const IFACE_MAX_SIXLOWPAN_ADDRESS_CONTEXT_COUNT: usize = 4;
     pub const IFACE_NEIGHBOR_CACHE_COUNT: usize = 3;
     pub const REASSEMBLY_BUFFER_COUNT: usize = 4;

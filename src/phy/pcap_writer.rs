@@ -176,11 +176,15 @@ where
         self.lower.capabilities()
     }
 
-    fn receive(&mut self, timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+    fn receive(
+        &self,
+        timestamp: Instant,
+        queue_id: usize,
+    ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         let sink = &self.sink;
         let mode = self.mode;
         self.lower
-            .receive(timestamp)
+            .receive(timestamp, queue_id)
             .map(move |(rx_token, tx_token)| {
                 let rx = RxToken {
                     token: rx_token,
@@ -198,15 +202,17 @@ where
             })
     }
 
-    fn transmit(&mut self, timestamp: Instant) -> Option<Self::TxToken<'_>> {
+    fn transmit(&self, timestamp: Instant, queue_id: usize) -> Option<Self::TxToken<'_>> {
         let sink = &self.sink;
         let mode = self.mode;
-        self.lower.transmit(timestamp).map(move |token| TxToken {
-            token,
-            sink,
-            mode,
-            timestamp,
-        })
+        self.lower
+            .transmit(timestamp, queue_id)
+            .map(move |token| TxToken {
+                token,
+                sink,
+                mode,
+                timestamp,
+            })
     }
 }
 

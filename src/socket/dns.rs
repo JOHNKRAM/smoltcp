@@ -373,7 +373,7 @@ impl<'a> Socket<'a> {
 
     pub(crate) fn process(
         &mut self,
-        _cx: &mut Context,
+        _cx: &Context,
         ip_repr: &IpRepr,
         udp_repr: &UdpRepr,
         payload: &[u8],
@@ -525,9 +525,9 @@ impl<'a> Socket<'a> {
         net_trace!("no query matched");
     }
 
-    pub(crate) fn dispatch<F, E>(&mut self, cx: &mut Context, emit: F) -> Result<(), E>
+    pub(crate) fn dispatch<F, E>(&mut self, cx: &Context, emit: F, now: Instant) -> Result<(), E>
     where
-        F: FnOnce(&mut Context, (IpRepr, UdpRepr, &[u8])) -> Result<(), E>,
+        F: FnOnce(&Context, (IpRepr, UdpRepr, &[u8])) -> Result<(), E>,
     {
         let hop_limit = self.hop_limit.unwrap_or(64);
 
@@ -550,15 +550,15 @@ impl<'a> Socket<'a> {
                 let timeout = if let Some(timeout) = pq.timeout_at {
                     timeout
                 } else {
-                    let v = cx.now() + RETRANSMIT_TIMEOUT;
+                    let v = now + RETRANSMIT_TIMEOUT;
                     pq.timeout_at = Some(v);
                     v
                 };
 
                 // Check timeout
-                if timeout < cx.now() {
+                if timeout < now {
                     // DNS timeout
-                    pq.timeout_at = Some(cx.now() + RETRANSMIT_TIMEOUT);
+                    pq.timeout_at = Some(now + RETRANSMIT_TIMEOUT);
                     pq.retransmit_at = Instant::ZERO;
                     pq.delay = RETRANSMIT_DELAY;
 
@@ -579,7 +579,7 @@ impl<'a> Socket<'a> {
                     continue;
                 }
 
-                if pq.retransmit_at > cx.now() {
+                if pq.retransmit_at > now {
                     // query is waiting for retransmit
                     continue;
                 }
@@ -628,7 +628,7 @@ impl<'a> Socket<'a> {
 
                 emit(cx, (ip_repr, udp_repr, payload))?;
 
-                pq.retransmit_at = cx.now() + pq.delay;
+                pq.retransmit_at = now + pq.delay;
                 pq.delay = MAX_RETRANSMIT_DELAY.min(pq.delay * 2);
 
                 return Ok(());

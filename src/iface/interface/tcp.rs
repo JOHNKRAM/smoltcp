@@ -1,13 +1,16 @@
 use super::*;
+use core::sync::atomic::Ordering::Relaxed;
 
 use crate::socket::tcp::Socket;
 
 impl InterfaceInner {
     pub(crate) fn process_tcp<'frame>(
-        &mut self,
-        sockets: &mut SocketSet,
+        &self,
+        sockets: &SocketSet,
         ip_repr: IpRepr,
         ip_payload: &'frame [u8],
+        queue_id: usize,
+        now: Instant,
     ) -> Option<Packet<'frame>> {
         let (src_addr, dst_addr) = (ip_repr.src_addr(), ip_repr.dst_addr());
         let tcp_packet = check!(TcpPacket::new_checked(ip_payload));
@@ -18,15 +21,24 @@ impl InterfaceInner {
             &self.caps.checksum
         ));
 
-        for tcp_socket in sockets
-            .items_mut()
-            .filter_map(|i| Socket::downcast_mut(&mut i.socket))
-        {
-            if tcp_socket.accepts(self, &ip_repr, &tcp_repr) {
-                return tcp_socket
-                    .process(self, &ip_repr, &tcp_repr)
-                    .map(|(ip, tcp)| Packet::new(ip, IpPayload::Tcp(tcp)));
+        for tcp_socket in sockets.items() {
+            if let Some(socket) = tcp_socket.socket.try_read().ok() {
+                if let Some(socket) = Socket::downcast(&socket) {
+                    if !socket.accepts(self, &ip_repr, &tcp_repr) {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
             }
+            tcp_socket.queue_id.store(queue_id, Relaxed);
+            let mut socket = tcp_socket.socket.write().unwrap();
+            let tcp_socket = Socket::downcast_mut(&mut socket).unwrap();
+            return tcp_socket
+                .process(self, &ip_repr, &tcp_repr, now)
+                .map(|(ip, tcp)| Packet::new(ip, IpPayload::Tcp(tcp)));
         }
 
         if tcp_repr.control == TcpControl::Rst

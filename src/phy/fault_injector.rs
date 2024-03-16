@@ -1,7 +1,10 @@
+use crate::config::QUEUE_COUNT;
 use crate::phy::{self, Device, DeviceCapabilities};
 use crate::time::{Duration, Instant};
 
 use super::PacketMeta;
+
+use std::sync::{Mutex, MutexGuard};
 
 // We use our own RNG to stay compatible with #![no_std].
 // The use of the RNG below has a slight bias, but it doesn't matter.
@@ -87,6 +90,26 @@ impl State {
     }
 }
 
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            rng_seed: 0,
+            refilled_at: Instant::from_millis(0),
+            tx_bucket: 0,
+            rx_bucket: 0,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RxBuf([u8; MTU]);
+
+impl Default for RxBuf {
+    fn default() -> Self {
+        Self([0u8; MTU])
+    }
+}
+
 /// A fault injector device.
 ///
 /// A fault injector is a device that alters packets traversing through it to simulate
@@ -95,25 +118,24 @@ impl State {
 #[derive(Debug)]
 pub struct FaultInjector<D: Device> {
     inner: D,
-    state: State,
+    state: [Mutex<State>; QUEUE_COUNT],
     config: Config,
-    rx_buf: [u8; MTU],
+    rx_buf: [Mutex<RxBuf>; QUEUE_COUNT],
 }
 
 impl<D: Device> FaultInjector<D> {
     /// Create a fault injector device, using the given random number generator seed.
     pub fn new(inner: D, seed: u32) -> FaultInjector<D> {
-        FaultInjector {
+        let mut f = FaultInjector {
             inner,
-            state: State {
-                rng_seed: seed,
-                refilled_at: Instant::from_millis(0),
-                tx_bucket: 0,
-                rx_bucket: 0,
-            },
+            state: Default::default(),
             config: Config::default(),
-            rx_buf: [0u8; MTU],
+            rx_buf: Default::default(),
+        };
+        for i in 0..QUEUE_COUNT {
+            f.state[i].get_mut().unwrap().rng_seed = seed + i as u32;
         }
+        f
     }
 
     /// Return the underlying device, consuming the fault injector.
@@ -190,7 +212,9 @@ impl<D: Device> FaultInjector<D> {
 
     /// Set the interval for packet rate limiting, in milliseconds.
     pub fn set_bucket_interval(&mut self, interval: Duration) {
-        self.state.refilled_at = Instant::from_millis(0);
+        for i in 0..QUEUE_COUNT {
+            self.state[i].get_mut().unwrap().refilled_at = Instant::from_millis(0);
+        }
         self.config.interval = interval
     }
 }
@@ -211,8 +235,14 @@ impl<D: Device> Device for FaultInjector<D> {
         caps
     }
 
-    fn receive(&mut self, timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        let (rx_token, tx_token) = self.inner.receive(timestamp)?;
+    fn receive(
+        &self,
+        timestamp: Instant,
+        queue_id: usize,
+    ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+        let mut state = self.state[queue_id].try_lock().ok()?;
+        let mut rx_buf = self.rx_buf[queue_id].try_lock().unwrap();
+        let (rx_token, tx_token) = self.inner.receive(timestamp, queue_id)?;
         let rx_meta = <D::RxToken<'_> as phy::RxToken>::meta(&rx_token);
 
         let len = super::RxToken::consume(rx_token, |buffer| {
@@ -222,30 +252,33 @@ impl<D: Device> Device for FaultInjector<D> {
                 net_trace!("rx: dropping a packet that is too large");
                 return None;
             }
-            self.rx_buf[..buffer.len()].copy_from_slice(buffer);
+            rx_buf.0[..buffer.len()].copy_from_slice(buffer);
             Some(buffer.len())
         })?;
 
-        let buf = &mut self.rx_buf[..len];
+        let buf = &mut rx_buf.0[..len];
 
-        if self.state.maybe(self.config.drop_pct) {
+        if state.maybe(self.config.drop_pct) {
             net_trace!("rx: randomly dropping a packet");
             return None;
         }
 
-        if !self.state.maybe_receive(&self.config, timestamp) {
+        if !state.maybe_receive(&self.config, timestamp) {
             net_trace!("rx: dropping a packet because of rate limiting");
             return None;
         }
 
-        if self.state.maybe(self.config.corrupt_pct) {
+        if state.maybe(self.config.corrupt_pct) {
             net_trace!("rx: randomly corrupting a packet");
-            self.state.corrupt(&mut buf[..]);
+            state.corrupt(&mut buf[..]);
         }
 
-        let rx = RxToken { buf, meta: rx_meta };
+        let rx = RxToken {
+            buf: rx_buf,
+            meta: rx_meta,
+        };
         let tx = TxToken {
-            state: &mut self.state,
+            state: state,
             config: self.config,
             token: tx_token,
             junk: [0; MTU],
@@ -254,29 +287,32 @@ impl<D: Device> Device for FaultInjector<D> {
         Some((rx, tx))
     }
 
-    fn transmit(&mut self, timestamp: Instant) -> Option<Self::TxToken<'_>> {
-        self.inner.transmit(timestamp).map(|token| TxToken {
-            state: &mut self.state,
-            config: self.config,
-            token,
-            junk: [0; MTU],
-            timestamp,
-        })
+    fn transmit(&self, timestamp: Instant, queue_id: usize) -> Option<Self::TxToken<'_>> {
+        let state = self.state[queue_id].try_lock().ok()?;
+        self.inner
+            .transmit(timestamp, queue_id)
+            .map(|token| TxToken {
+                state: state,
+                config: self.config,
+                token,
+                junk: [0; MTU],
+                timestamp,
+            })
     }
 }
 
 #[doc(hidden)]
 pub struct RxToken<'a> {
-    buf: &'a mut [u8],
+    buf: MutexGuard<'a, RxBuf>,
     meta: PacketMeta,
 }
 
 impl<'a> phy::RxToken for RxToken<'a> {
-    fn consume<R, F>(self, f: F) -> R
+    fn consume<R, F>(mut self, f: F) -> R
     where
         F: FnOnce(&mut [u8]) -> R,
     {
-        f(self.buf)
+        f(&mut self.buf.0)
     }
 
     fn meta(&self) -> phy::PacketMeta {
@@ -286,7 +322,7 @@ impl<'a> phy::RxToken for RxToken<'a> {
 
 #[doc(hidden)]
 pub struct TxToken<'a, Tx: phy::TxToken> {
-    state: &'a mut State,
+    state: MutexGuard<'a, State>,
     config: Config,
     token: Tx,
     junk: [u8; MTU],

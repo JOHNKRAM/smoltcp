@@ -72,7 +72,7 @@ pub enum Socket<'a> {
 }
 
 impl<'a> Socket<'a> {
-    pub(crate) fn poll_at(&self, cx: &mut Context) -> PollAt {
+    pub(crate) fn poll_at(&self, cx: &Context) -> PollAt {
         match self {
             #[cfg(feature = "socket-raw")]
             Socket::Raw(s) => s.poll_at(cx),

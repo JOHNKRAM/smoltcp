@@ -257,10 +257,26 @@ pub(crate) struct FragmentsBuffer {
     pub decompress_buf: [u8; MAX_DECOMPRESSED_LEN],
 
     #[cfg(feature = "_proto-fragmentation")]
-    pub assembler: PacketAssemblerSet<FragKey>,
+    pub assembler: PacketAssemblerSet<FragKey>, //内部控制
 
     #[cfg(feature = "_proto-fragmentation")]
-    pub reassembly_timeout: Duration,
+    pub reassembly_timeout: Duration, //只读
+}
+
+impl Default for FragmentsBuffer {
+    fn default() -> Self {
+        {
+            Self {
+                #[cfg(feature = "proto-sixlowpan")]
+                decompress_buf: [0u8; MAX_DECOMPRESSED_LEN],
+
+                #[cfg(feature = "_proto-fragmentation")]
+                assembler: PacketAssemblerSet::new(),
+                #[cfg(feature = "_proto-fragmentation")]
+                reassembly_timeout: Duration::from_secs(60),
+            }
+        }
+    }
 }
 
 #[cfg(not(feature = "_proto-fragmentation"))]
@@ -396,6 +412,12 @@ impl Fragmenter {
     }
 }
 
+impl Default for Fragmenter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,33 +495,33 @@ mod tests {
         let mut set = PacketAssemblerSet::new();
 
         let key = Key { id: 0 };
-        let assr = set.get(&key, Instant::ZERO).unwrap();
+        let assr = set.get(&key, Instant::ZERO).unwrap().deref_mut();
         assert_eq!(assr.assemble(), None);
         assr.set_total_size(0).unwrap();
         assr.assemble().unwrap();
 
         // Test that `.assemble()` effectively deletes it.
-        let assr = set.get(&key, Instant::ZERO).unwrap();
+        let assr = set.get(&key, Instant::ZERO).unwrap().deref_mut();
         assert_eq!(assr.assemble(), None);
         assr.set_total_size(0).unwrap();
         assr.assemble().unwrap();
 
         let key = Key { id: 1 };
-        let assr = set.get(&key, Instant::ZERO).unwrap();
+        let assr = set.get(&key, Instant::ZERO).unwrap().deref_mut();
         assr.set_total_size(0).unwrap();
         assr.assemble().unwrap();
 
         let key = Key { id: 2 };
-        let assr = set.get(&key, Instant::ZERO).unwrap();
+        let assr = set.get(&key, Instant::ZERO).unwrap().deref_mut();
         assr.set_total_size(0).unwrap();
         assr.assemble().unwrap();
 
         let key = Key { id: 2 };
-        let assr = set.get(&key, Instant::ZERO).unwrap();
+        let assr = set.get(&key, Instant::ZERO).unwrap().deref_mut();
         assr.set_total_size(2).unwrap();
         assr.add(&[0x00], 0).unwrap();
         assert_eq!(assr.assemble(), None);
-        let assr = set.get(&key, Instant::ZERO).unwrap();
+        let assr = set.get(&key, Instant::ZERO).unwrap().deref_mut();
         assr.add(&[0x01], 1).unwrap();
         assert_eq!(assr.assemble(), Some(&[0x00, 0x01][..]));
     }

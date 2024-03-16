@@ -338,7 +338,7 @@ impl<'a> Socket<'a> {
         true
     }
 
-    pub(crate) fn process(&mut self, cx: &mut Context, ip_repr: &IpRepr, payload: &[u8]) {
+    pub(crate) fn process(&mut self, cx: &Context, ip_repr: &IpRepr, payload: &[u8]) {
         debug_assert!(self.accepts(ip_repr));
 
         let header_len = ip_repr.header_len();
@@ -367,9 +367,9 @@ impl<'a> Socket<'a> {
         self.rx_waker.wake();
     }
 
-    pub(crate) fn dispatch<F, E>(&mut self, cx: &mut Context, emit: F) -> Result<(), E>
+    pub(crate) fn dispatch<F, E>(&mut self, cx: &Context, emit: F) -> Result<(), E>
     where
-        F: FnOnce(&mut Context, (IpRepr, &[u8])) -> Result<(), E>,
+        F: FnOnce(&Context, (IpRepr, &[u8])) -> Result<(), E>,
     {
         let ip_protocol = self.ip_protocol;
         let ip_version = self.ip_version;
@@ -450,7 +450,7 @@ impl<'a> Socket<'a> {
         }
     }
 
-    pub(crate) fn poll_at(&self, _cx: &mut Context) -> PollAt {
+    pub(crate) fn poll_at(&self, _cx: &Context) -> PollAt {
         if self.tx_buffer.is_empty() {
             PollAt::Ingress
         } else {

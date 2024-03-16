@@ -1,5 +1,6 @@
 use super::*;
 use crate::wire::Result;
+use core::sync::atomic::Ordering::Relaxed;
 
 // Max len of non-fragmented packets after decompression (including ipv6 header and payload)
 // TODO: lower. Should be (6lowpan mtu) - (min 6lowpan header size) + (max ipv6 header size)
@@ -12,24 +13,29 @@ impl Interface {
     /// processed or emitted, and thus, whether the readiness of any socket might
     /// have changed.
     #[cfg(feature = "proto-sixlowpan-fragmentation")]
-    pub(super) fn sixlowpan_egress<D>(&mut self, device: &mut D) -> bool
+    pub(super) fn sixlowpan_egress<D>(&self, device: &D, queue_id: usize, now: Instant) -> bool
     where
         D: Device + ?Sized,
     {
+        let fragmenter_guard = self.get_fragmenter_ingress(queue_id);
+        if fragmenter_guard.is_none() {
+            return false;
+        }
+        let mut fragmenter_guard = fragmenter_guard.unwrap();
+        let fragmenter = fragmenter_guard.deref_mut();
         // Reset the buffer when we transmitted everything.
-        if self.fragmenter.finished() {
-            self.fragmenter.reset();
+        if fragmenter.finished() {
+            fragmenter.reset();
         }
 
-        if self.fragmenter.is_empty() {
+        if fragmenter.is_empty() {
             return false;
         }
 
-        let pkt = &self.fragmenter;
+        let pkt = fragmenter;
         if pkt.packet_len > pkt.sent_bytes {
-            if let Some(tx_token) = device.transmit(self.inner.now) {
-                self.inner
-                    .dispatch_ieee802154_frag(tx_token, &mut self.fragmenter);
+            if let Some(tx_token) = device.transmit(now, queue_id) {
+                self.inner.dispatch_ieee802154_frag(tx_token, pkt);
                 return true;
             }
         }
@@ -52,19 +58,19 @@ impl Interface {
 impl InterfaceInner {
     /// Get the next tag for a 6LoWPAN fragment.
     #[cfg(feature = "proto-sixlowpan-fragmentation")]
-    fn get_sixlowpan_fragment_tag(&mut self) -> u16 {
-        let tag = self.tag;
-        self.tag = self.tag.wrapping_add(1);
-        tag
+    fn get_sixlowpan_fragment_tag(&self) -> u16 {
+        self.tag.fetch_add(1, Relaxed)
     }
 
     pub(super) fn process_sixlowpan<'output, 'payload: 'output>(
-        &mut self,
-        sockets: &mut SocketSet,
+        &self,
+        sockets: &SocketSet,
         meta: PacketMeta,
         ieee802154_repr: &Ieee802154Repr,
         payload: &'payload [u8],
         f: &'output mut FragmentsBuffer,
+        queue_id: usize,
+        now: Instant,
     ) -> Option<Packet<'output>> {
         let payload = match check!(SixlowpanPacket::dispatch(payload)) {
             #[cfg(not(feature = "proto-sixlowpan-fragmentation"))]
@@ -77,7 +83,7 @@ impl InterfaceInner {
             }
             #[cfg(feature = "proto-sixlowpan-fragmentation")]
             SixlowpanPacket::FragmentHeader => {
-                match self.process_sixlowpan_fragment(ieee802154_repr, payload, f) {
+                match self.process_sixlowpan_fragment(ieee802154_repr, payload, f, now) {
                     Some(payload) => payload,
                     None => return None,
                 }
@@ -99,15 +105,22 @@ impl InterfaceInner {
             }
         };
 
-        self.process_ipv6(sockets, meta, &check!(Ipv6Packet::new_checked(payload)))
+        self.process_ipv6(
+            sockets,
+            meta,
+            &check!(Ipv6Packet::new_checked(payload)),
+            queue_id,
+            now,
+        )
     }
 
     #[cfg(feature = "proto-sixlowpan-fragmentation")]
     fn process_sixlowpan_fragment<'output, 'payload: 'output>(
-        &mut self,
+        &self,
         ieee802154_repr: &Ieee802154Repr,
         payload: &'payload [u8],
         f: &'output mut FragmentsBuffer,
+        now: Instant,
     ) -> Option<&'output [u8]> {
         use crate::iface::fragmentation::{AssemblerError, AssemblerFullError};
 
@@ -127,7 +140,7 @@ impl InterfaceInner {
         // This information is the total size of the packet when it is fully assmbled.
         // We also pass the header size, since this is needed when other fragments
         // (other than the first one) are added.
-        let frag_slot = match f.assembler.get(&key, self.now + f.reassembly_timeout) {
+        let frag_slot = match f.assembler.get(&key, now + f.reassembly_timeout) {
             Ok(frag) => frag,
             Err(AssemblerFullError) => {
                 net_debug!("No available packet assembler for fragmented packet");
@@ -286,7 +299,7 @@ impl InterfaceInner {
     }
 
     pub(super) fn dispatch_sixlowpan<Tx: TxToken>(
-        &mut self,
+        &self,
         mut tx_token: Tx,
         meta: PacketMeta,
         packet: Packet,
@@ -646,7 +659,7 @@ impl InterfaceInner {
 
     #[cfg(feature = "proto-sixlowpan-fragmentation")]
     pub(super) fn dispatch_sixlowpan_frag<Tx: TxToken>(
-        &mut self,
+        &self,
         tx_token: Tx,
         ieee_repr: Ieee802154Repr,
         frag: &mut Fragmenter,

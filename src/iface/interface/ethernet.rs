@@ -2,11 +2,13 @@ use super::*;
 
 impl InterfaceInner {
     pub(super) fn process_ethernet<'frame>(
-        &mut self,
-        sockets: &mut SocketSet,
+        &self,
+        sockets: &SocketSet,
         meta: crate::phy::PacketMeta,
         frame: &'frame [u8],
         fragments: &'frame mut FragmentsBuffer,
+        queue_id: usize,
+        now: Instant,
     ) -> Option<EthernetPacket<'frame>> {
         let eth_frame = check!(EthernetFrame::new_checked(frame));
 
@@ -20,18 +22,18 @@ impl InterfaceInner {
 
         match eth_frame.ethertype() {
             #[cfg(feature = "proto-ipv4")]
-            EthernetProtocol::Arp => self.process_arp(self.now, &eth_frame),
+            EthernetProtocol::Arp => self.process_arp(now, &eth_frame),
             #[cfg(feature = "proto-ipv4")]
             EthernetProtocol::Ipv4 => {
                 let ipv4_packet = check!(Ipv4Packet::new_checked(eth_frame.payload()));
 
-                self.process_ipv4(sockets, meta, &ipv4_packet, fragments)
+                self.process_ipv4(sockets, meta, &ipv4_packet, fragments, queue_id, now)
                     .map(EthernetPacket::Ip)
             }
             #[cfg(feature = "proto-ipv6")]
             EthernetProtocol::Ipv6 => {
                 let ipv6_packet = check!(Ipv6Packet::new_checked(eth_frame.payload()));
-                self.process_ipv6(sockets, meta, &ipv6_packet)
+                self.process_ipv6(sockets, meta, &ipv6_packet, queue_id, now)
                     .map(EthernetPacket::Ip)
             }
             // Drop all other traffic.
@@ -40,7 +42,7 @@ impl InterfaceInner {
     }
 
     pub(super) fn dispatch_ethernet<Tx, F>(
-        &mut self,
+        &self,
         tx_token: Tx,
         buffer_len: usize,
         f: F,

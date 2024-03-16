@@ -22,7 +22,7 @@ fn main() {
     let mut matches = utils::parse_options(&opts, free);
     let device = utils::parse_tuntap_options(&mut matches);
 
-    let fd = device.as_raw_fd();
+    let fd = device.as_raw_fd(0);
     let mut device =
         utils::parse_middleware_options(&mut matches, device, /*loopback=*/ false);
     let address = IpAddress::from_str(&matches.free[0]).expect("invalid address format");
@@ -74,7 +74,8 @@ fn main() {
     let mut tcp_active = false;
     loop {
         let timestamp = Instant::now();
-        iface.poll(timestamp, &mut device, &mut sockets);
+        iface.poll(timestamp, &mut device, &mut sockets, 0);
+        iface.poll_tx(timestamp, &mut device, &mut sockets, 0);
 
         let socket = sockets.get_mut::<tcp::Socket>(tcp_handle);
         if socket.is_active() && !tcp_active {
