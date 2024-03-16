@@ -52,7 +52,7 @@ impl TunTapInterfaceDesc {
             #[cfg(feature = "medium-ieee802154")]
             Medium::Ieee802154 => todo!(),
         };
-        ifr.ifr_data = mode | imp::IFF_NO_PI;
+        ifr.ifr_data = mode | imp::IFF_NO_PI | 256;
         ifreq_ioctl(lower, ifr, imp::TUNSETIFF).map(|_| ())
     }
 
