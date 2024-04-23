@@ -373,7 +373,7 @@ impl<'a, T: 'a> RingBuffer<'a, T> {
     /// starting at the given offset past the first allocated element, and return
     /// the amount read.
     #[must_use]
-    pub fn read_allocated(&mut self, offset: usize, data: &mut [T]) -> usize
+    pub fn read_allocated(&self, offset: usize, data: &mut [T]) -> usize
     where
         T: Copy,
     {

@@ -40,6 +40,7 @@ use core::sync::atomic::AtomicU16;
 use core::sync::atomic::AtomicU8;
 use core::sync::atomic::Ordering::Relaxed;
 use std::os::fd::RawFd;
+use std::sync::RwLock;
 
 use heapless::{LinearMap, Vec};
 
@@ -111,7 +112,7 @@ pub struct InterfaceInner {
     rand: Rand,               //随机数生成器，可多个
 
     #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
-    neighbor_cache: Mutex<NeighborCache>, //ARP cache，只能有一个，要么内部并发要么加锁，倾向于加锁
+    neighbor_cache: RwLock<NeighborCache>, //ARP cache，只能有一个，要么内部并发要么加锁，倾向于加锁
     hardware_addr: HardwareAddress, //只读，硬件地址
     #[cfg(feature = "medium-ieee802154")]
     sequence_no: AtomicU8, //原子变量，ieee802.15.4使用
@@ -124,12 +125,12 @@ pub struct InterfaceInner {
         Vec<SixlowpanAddressContext, IFACE_MAX_SIXLOWPAN_ADDRESS_CONTEXT_COUNT>,
     #[cfg(feature = "proto-sixlowpan-fragmentation")]
     tag: AtomicU16,
-    ip_addrs: Vec<IpCidr, IFACE_MAX_ADDR_COUNT>, //只读，相邻ip地址？
+    ip_addrs: Vec<IpCidr, IFACE_MAX_ADDR_COUNT>, //只读，自己的IP地址
     #[cfg(feature = "proto-ipv4")]
-    any_ip: bool, //只读？
-    routes: Routes,                              //只读？
+    any_ip: bool, //只读，是否接受发给同网络任意IP地址的包
+    routes: Routes,                              //只读，可路由的IP范围
     #[cfg(feature = "proto-igmp")]
-    ipv4_multicast_groups: LinearMap<Ipv4Address, (), IFACE_MAX_MULTICAST_GROUP_COUNT>, //只读？
+    ipv4_multicast_groups: LinearMap<Ipv4Address, (), IFACE_MAX_MULTICAST_GROUP_COUNT>, //只读，所在的IPV4多播组
     /// When to report for (all or) the next multicast group membership via IGMP
     #[cfg(feature = "proto-igmp")]
     igmp_report_state: Mutex<IgmpReportState>, //应该只能有一个，需要加锁
@@ -233,7 +234,7 @@ impl Interface {
                 any_ip: false,
                 routes: Routes::new(),
                 #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
-                neighbor_cache: Mutex::new(NeighborCache::new()),
+                neighbor_cache: RwLock::new(NeighborCache::new()),
                 #[cfg(feature = "proto-igmp")]
                 ipv4_multicast_groups: LinearMap::new(),
                 #[cfg(feature = "proto-igmp")]
@@ -1010,14 +1011,14 @@ impl InterfaceInner {
                 #[cfg(feature = "medium-ethernet")]
                 Medium::Ethernet => self
                     .neighbor_cache
-                    .lock()
+                    .read()
                     .unwrap()
                     .lookup(&_routed_addr, now)
                     .found(),
                 #[cfg(feature = "medium-ieee802154")]
                 Medium::Ieee802154 => self
                     .neighbor_cache
-                    .lock()
+                    .read()
                     .unwrap()
                     .lookup(&_routed_addr, now)
                     .found(),
@@ -1093,7 +1094,7 @@ impl InterfaceInner {
 
         let dst_addr = self.route(dst_addr, now).ok_or(DispatchError::NoRoute)?;
 
-        match self.neighbor_cache.lock().unwrap().lookup(&dst_addr, now) {
+        match self.neighbor_cache.read().unwrap().lookup(&dst_addr, now) {
             NeighborAnswer::Found(hardware_addr) => return Ok((hardware_addr, tx_token)),
             NeighborAnswer::RateLimited => return Err(DispatchError::NeighborPending),
             _ => (), // XXX
@@ -1167,13 +1168,13 @@ impl InterfaceInner {
         }
 
         // The request got dispatched, limit the rate on the cache.
-        self.neighbor_cache.lock().unwrap().limit_rate(now);
+        self.neighbor_cache.write().unwrap().limit_rate(now);
         Err(DispatchError::NeighborPending)
     }
 
     fn flush_neighbor_cache(&mut self) {
         #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
-        self.neighbor_cache.lock().unwrap().flush()
+        self.neighbor_cache.write().unwrap().flush()
     }
 
     fn dispatch_ip<Tx: TxToken>(

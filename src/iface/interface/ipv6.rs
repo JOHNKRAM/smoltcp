@@ -425,7 +425,7 @@ impl InterfaceInner {
                     if !lladdr.is_unicast() || !target_addr.is_unicast() {
                         return None;
                     }
-                    let mut neighbor_cache = self.neighbor_cache.lock().unwrap();
+                    let mut neighbor_cache = self.neighbor_cache.write().unwrap();
                     if flags.contains(NdiscNeighborFlags::OVERRIDE)
                         || !neighbor_cache.lookup(&ip_addr, now).found()
                     {
@@ -445,7 +445,7 @@ impl InterfaceInner {
                         return None;
                     }
                     self.neighbor_cache
-                        .lock()
+                        .write()
                         .unwrap()
                         .fill(ip_repr.src_addr.into(), lladdr, now);
                 }

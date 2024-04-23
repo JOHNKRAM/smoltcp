@@ -1102,7 +1102,7 @@ impl<'a> Socket<'a> {
         })
     }
 
-    fn recv_error_check(&mut self) -> Result<(), RecvError> {
+    fn recv_error_check(&self) -> Result<(), RecvError> {
         // We may have received some data inside the initial SYN, but until the connection
         // is fully open we must not dequeue any data, as it may be overwritten by e.g.
         // another (stale) SYN. (We do not support TCP Fast Open.)
@@ -1170,7 +1170,7 @@ impl<'a> Socket<'a> {
     /// the receive buffer, and return a pointer to it.
     ///
     /// This function otherwise behaves identically to [recv](#method.recv).
-    pub fn peek(&mut self, size: usize) -> Result<&[u8], RecvError> {
+    pub fn peek(&self, size: usize) -> Result<&[u8], RecvError> {
         self.recv_error_check()?;
 
         let buffer = self.rx_buffer.get_allocated(0, size);
@@ -1185,7 +1185,7 @@ impl<'a> Socket<'a> {
     /// the receive buffer, and fill a slice from it.
     ///
     /// This function otherwise behaves identically to [recv_slice](#method.recv_slice).
-    pub fn peek_slice(&mut self, data: &mut [u8]) -> Result<usize, RecvError> {
+    pub fn peek_slice(&self, data: &mut [u8]) -> Result<usize, RecvError> {
         Ok(self.rx_buffer.read_allocated(0, data))
     }
 
