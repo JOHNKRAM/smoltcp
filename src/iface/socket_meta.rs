@@ -30,10 +30,10 @@ enum NeighborState {
 /// itself.
 #[derive(Debug, Default)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub(crate) struct Meta {
+pub struct Meta {
     /// Handle of this socket within its enclosing `SocketSet`.
     /// Mainly useful for debug output.
-    pub(crate) handle: SocketHandle,
+    pub handle: SocketHandle,
     /// See [NeighborState](struct.NeighborState.html).
     neighbor_state: NeighborState,
 }

@@ -29,7 +29,7 @@ impl<'a> SocketStorage<'a> {
 /// An item of a socket set.
 #[derive(Debug)]
 pub struct Item<'a> {
-    pub(crate) meta: RwLock<Meta>,
+    pub meta: RwLock<Meta>,
     pub queue_id: AtomicUsize,
     pub socket: RwLock<Socket<'a>>,
 }

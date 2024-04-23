@@ -1,3 +1,5 @@
+use log::info;
+
 use super::*;
 use core::sync::atomic::Ordering::Relaxed;
 
@@ -33,7 +35,15 @@ impl InterfaceInner {
             } else {
                 continue;
             }
-            tcp_socket.queue_id.store(queue_id, Relaxed);
+            let old_queue_id = tcp_socket.queue_id.swap(queue_id, Relaxed);
+            if old_queue_id != queue_id {
+                info!(
+                    "socket {} queue {} {}",
+                    tcp_socket.meta.read().unwrap().handle,
+                    old_queue_id,
+                    queue_id
+                );
+            }
             let mut socket = tcp_socket.socket.write().unwrap();
             let tcp_socket = Socket::downcast_mut(&mut socket).unwrap();
             return tcp_socket

@@ -495,33 +495,33 @@ mod tests {
         let mut set = PacketAssemblerSet::new();
 
         let key = Key { id: 0 };
-        let assr = set.get(&key, Instant::ZERO).unwrap().deref_mut();
+        let assr = set.get(&key, Instant::ZERO).unwrap();
         assert_eq!(assr.assemble(), None);
         assr.set_total_size(0).unwrap();
         assr.assemble().unwrap();
 
         // Test that `.assemble()` effectively deletes it.
-        let assr = set.get(&key, Instant::ZERO).unwrap().deref_mut();
+        let assr = set.get(&key, Instant::ZERO).unwrap();
         assert_eq!(assr.assemble(), None);
         assr.set_total_size(0).unwrap();
         assr.assemble().unwrap();
 
         let key = Key { id: 1 };
-        let assr = set.get(&key, Instant::ZERO).unwrap().deref_mut();
+        let assr = set.get(&key, Instant::ZERO).unwrap();
         assr.set_total_size(0).unwrap();
         assr.assemble().unwrap();
 
         let key = Key { id: 2 };
-        let assr = set.get(&key, Instant::ZERO).unwrap().deref_mut();
+        let assr = set.get(&key, Instant::ZERO).unwrap();
         assr.set_total_size(0).unwrap();
         assr.assemble().unwrap();
 
         let key = Key { id: 2 };
-        let assr = set.get(&key, Instant::ZERO).unwrap().deref_mut();
+        let assr = set.get(&key, Instant::ZERO).unwrap();
         assr.set_total_size(2).unwrap();
         assr.add(&[0x00], 0).unwrap();
         assert_eq!(assr.assemble(), None);
-        let assr = set.get(&key, Instant::ZERO).unwrap().deref_mut();
+        let assr = set.get(&key, Instant::ZERO).unwrap();
         assr.add(&[0x01], 1).unwrap();
         assert_eq!(assr.assemble(), Some(&[0x00, 0x01][..]));
     }

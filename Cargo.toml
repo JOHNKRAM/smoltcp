@@ -25,6 +25,7 @@ bitflags = { version = "1.0", default-features = false }
 defmt = { version = "0.3", optional = true }
 cfg-if = "1.0.0"
 heapless = "0.8"
+core_affinity = "0.5.10"
 
 [dev-dependencies]
 env_logger = "0.10"

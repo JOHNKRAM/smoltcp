@@ -10,7 +10,7 @@ use std::os::fd::RawFd;
 use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::thread;
+use std::thread::{self, sleep};
 
 use smoltcp::config::QUEUE_COUNT;
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
@@ -20,7 +20,9 @@ use smoltcp::socket::AnySocket;
 use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr};
 
-const THREADS: usize = QUEUE_COUNT;
+use core_affinity::{get_core_ids, set_for_current, CoreId};
+
+const THREADS: usize = 7;
 const AMOUNT: usize = 1_000_000_000;
 
 enum Client {
@@ -29,6 +31,7 @@ enum Client {
 }
 
 fn client(kind: Client, id: usize) {
+    set_for_current(CoreId { id });
     let port = match kind {
         Client::Reader => 1234 + 2 * id as u16,
         Client::Writer => 1235 + 2 * id as u16,
@@ -80,8 +83,11 @@ fn server<D>(
 ) where
     D: Device + ?Sized,
 {
+    set_for_current(CoreId { id: id + THREADS });
+    println!("SERVER {id} STARTED");
     let default_timeout = Some(Duration::from_millis(1000));
-    let mut processed = 0;
+    let now = Instant::now();
+    let mut processeds = [0usize; THREADS];
     let device = device.as_ref();
     while CLIENT_DONE.load(Ordering::SeqCst) != THREADS {
         let timestamp = Instant::now();
@@ -100,32 +106,33 @@ fn server<D>(
             let mut socket_guard = item.socket.write().unwrap();
             let socket = tcp::Socket::downcast_mut(socket_guard.deref_mut()).unwrap();
 
-            let port = socket.listen_endpoint.port;
+            let port = socket.listen_endpoint.port as usize;
+            let processed = &mut processeds[port - 1234 >> 1];
 
             if port % 2 == 0 {
-
                 if socket.can_send() {
-                    if processed < AMOUNT {
+                    if *processed < AMOUNT {
                         let length = socket
                             .send(|buffer| {
-                                let length = cmp::min(buffer.len(), AMOUNT - processed);
+                                let length = cmp::min(buffer.len(), AMOUNT - *processed);
                                 (length, length)
                             })
                             .unwrap();
-                        processed += length;
+                        *processed += length;
+                        // println!("Send {} to client {} at {}", *processed, item.meta.read().unwrap().handle, (timestamp - now).total_millis());
                     }
                 }
             } else {
                 if socket.can_recv() {
-                    if processed < AMOUNT {
+                    if *processed < AMOUNT {
                         let length = socket
                             .recv(|buffer| {
-                                let length = cmp::min(buffer.len(), AMOUNT - processed);
+                                let length = cmp::min(buffer.len(), AMOUNT - *processed);
                                 // assert!(buffer[..length].iter().all(|x| { *x == 0u8 }));
                                 (length, length)
                             })
                             .unwrap();
-                        processed += length;
+                        *processed += length;
                     }
                 }
             }
@@ -134,10 +141,12 @@ fn server<D>(
 
         match iface.poll_at(timestamp, &sockets, id) {
             Some(poll_at) if timestamp < poll_at => {
+                // println!("Wait for {}", poll_at - timestamp);
                 phy_wait(fd, Some(poll_at - timestamp)).expect("wait error");
             }
             Some(_) => (),
             None => {
+                // println!("Wait for {}", default_timeout.unwrap());
                 phy_wait(fd, default_timeout).expect("wait error");
             }
         }
@@ -185,6 +194,7 @@ fn main() {
     let mut tcp1_handles: Vec<SocketHandle> = Vec::new();
     let mut tcp2_handles: Vec<SocketHandle> = Vec::new();
     let mut sockets = SocketSet::new(vec![]);
+    let mut threads = Vec::new();
     for id in 0..THREADS {
         let tcp1_rx_buffer = tcp::SocketBuffer::new(vec![0; 65535]);
         let tcp1_tx_buffer = tcp::SocketBuffer::new(vec![0; 65535]);
@@ -203,7 +213,7 @@ fn main() {
             _ => panic!("invalid mode"),
         };
 
-        thread::spawn(move || client(mode, id.clone()));
+        threads.push(thread::spawn(move || client(mode, id.clone())));
     }
     let device = Arc::new(device);
     let sockets = Arc::new(sockets);
@@ -216,7 +226,7 @@ fn main() {
         let tcp1_handle = tcp1_handles[id];
         let tcp2_handle = tcp2_handles[id];
         let fd = fds[id];
-        thread::spawn(move || {
+        threads.push(thread::spawn(move || {
             server(
                 id.clone(),
                 device,
@@ -226,7 +236,9 @@ fn main() {
                 tcp2_handle,
                 fd,
             )
-        });
+        }));
     }
-    while CLIENT_DONE.load(Ordering::SeqCst) != THREADS {}
+    for t in threads {
+        t.join().unwrap();
+    }
 }

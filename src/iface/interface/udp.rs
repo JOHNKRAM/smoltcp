@@ -61,8 +61,8 @@ impl InterfaceInner {
             }
             dns_socket.queue_id.store(queue_id, Relaxed);
             let mut socket = dns_socket.socket.write().unwrap();
-            let dns_socket = UdpSocket::downcast_mut(&mut socket).unwrap();
-            dns_socket.process(self, meta, &ip_repr, &udp_repr, udp_packet.payload());
+            let dns_socket = DnsSocket::downcast_mut(&mut socket).unwrap();
+            dns_socket.process(self, &ip_repr, &udp_repr, udp_packet.payload());
             return None;
         }
 
