@@ -24,7 +24,7 @@ impl InterfaceInner {
         ));
 
         for tcp_socket in sockets.items() {
-            if let Some(socket) = tcp_socket.socket.try_read().ok() {
+            if let Some(socket) = tcp_socket.socket_try_read() {
                 if let Some(socket) = Socket::downcast(&socket) {
                     if !socket.accepts(self, &ip_repr, &tcp_repr) {
                         continue;
@@ -39,13 +39,13 @@ impl InterfaceInner {
             if old_queue_id != queue_id {
                 info!(
                     "socket {} queue {} {}",
-                    tcp_socket.meta.read().unwrap().handle,
+                    tcp_socket.meta_read().handle,
                     old_queue_id,
                     queue_id
                 );
             }
-            let mut socket = tcp_socket.socket.write().unwrap();
-            let tcp_socket = Socket::downcast_mut(&mut socket).unwrap();
+            let mut socket = tcp_socket.socket_write();
+            let tcp_socket = Socket::downcast_mut(socket.deref_mut()).unwrap();
             return tcp_socket
                 .process(self, &ip_repr, &tcp_repr, now)
                 .map(|(ip, tcp)| Packet::new(ip, IpPayload::Tcp(tcp)));

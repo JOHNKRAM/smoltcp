@@ -348,7 +348,7 @@ impl InterfaceInner {
         {
             use crate::socket::icmp::Socket as IcmpSocket;
             for icmp_socket in _sockets.items() {
-                if let Some(socket) = icmp_socket.socket.try_read().ok() {
+                if let Some(socket) = icmp_socket.socket_try_read() {
                     if let Some(socket) = IcmpSocket::downcast(&socket) {
                         if !socket.accepts_v6(self, &ip_repr, &icmp_repr) {
                             continue;
@@ -360,8 +360,8 @@ impl InterfaceInner {
                     continue;
                 }
                 icmp_socket.queue_id.store(queue_id, Relaxed);
-                let mut socket = icmp_socket.socket.write().unwrap();
-                let icmp_socket = IcmpSocket::downcast_mut(&mut socket).unwrap();
+                let mut socket = icmp_socket.socket_write();
+                let icmp_socket = IcmpSocket::downcast_mut(socket.deref_mut()).unwrap();
                 icmp_socket.process_v6(self, &ip_repr, &icmp_repr);
                 handled_by_icmp_socket = true;
             }
@@ -425,7 +425,7 @@ impl InterfaceInner {
                     if !lladdr.is_unicast() || !target_addr.is_unicast() {
                         return None;
                     }
-                    let mut neighbor_cache = self.neighbor_cache.write().unwrap();
+                    let mut neighbor_cache = self.neighbor_cache_write();
                     if flags.contains(NdiscNeighborFlags::OVERRIDE)
                         || !neighbor_cache.lookup(&ip_addr, now).found()
                     {
@@ -444,9 +444,7 @@ impl InterfaceInner {
                     if !lladdr.is_unicast() || !target_addr.is_unicast() {
                         return None;
                     }
-                    self.neighbor_cache
-                        .write()
-                        .unwrap()
+                    self.neighbor_cache_write()
                         .fill(ip_repr.src_addr.into(), lladdr, now);
                 }
 

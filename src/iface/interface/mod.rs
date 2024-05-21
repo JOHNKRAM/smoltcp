@@ -29,7 +29,7 @@ pub use igmp::MulticastError;
 
 use super::packet::*;
 
-use core::ops::DerefMut;
+use core::ops::DerefMut as _;
 use core::result::Result;
 #[cfg(any(
     feature = "proto-ipv4-fragmentation",
@@ -39,8 +39,11 @@ use core::sync::atomic::AtomicU16;
 #[cfg(feature = "medium-ieee802154")]
 use core::sync::atomic::AtomicU8;
 use core::sync::atomic::Ordering::Relaxed;
+#[cfg(feature = "std")]
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+#[cfg(not(feature = "std"))]
+use spin::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::os::fd::RawFd;
-use std::sync::RwLock;
 
 use heapless::{LinearMap, Vec};
 
@@ -531,15 +534,12 @@ impl Interface {
                     return None;
                 }
                 // println!("{} start to check a socket", queue_id);
-                let socket_poll_at = item.socket.read().unwrap().poll_at(inner);
+                let socket_poll_at = item.socket_read().poll_at(inner);
                 // println!("{} end to check a socket", queue_id);
-                match item
-                    .meta
-                    .read()
-                    .unwrap()
-                    .poll_at(socket_poll_at, |ip_addr| {
-                        inner.has_neighbor(&ip_addr, timestamp)
-                    }) {
+                #[cfg(feature = "std")]
+                match item.meta_read().poll_at(socket_poll_at, |ip_addr| {
+                    inner.has_neighbor(&ip_addr, timestamp)
+                }) {
                     PollAt::Ingress => None,
                     PollAt::Time(instant) => Some(instant),
                     PollAt::Now => Some(Instant::from_millis(0)),
@@ -683,7 +683,7 @@ impl Interface {
             if item.queue_id.load(Relaxed) != queue_id {
                 continue;
             }
-            let mut meta = item.meta.write().unwrap();
+            let mut meta = item.meta_write();
             if !meta.egress_permitted(now, |ip_addr| self.inner.has_neighbor(&ip_addr, now)) {
                 continue;
             }
@@ -705,7 +705,7 @@ impl Interface {
                 Ok(())
             };
 
-            let result = match &mut item.socket.write().unwrap().deref_mut() {
+            let result = match &mut item.socket_write().deref_mut() {
                 #[cfg(feature = "socket-raw")]
                 Socket::Raw(socket) => socket.dispatch(&self.inner, |inner, (ip, raw)| {
                     respond(
@@ -810,6 +810,20 @@ impl InterfaceInner {
     // pub(crate) fn now(&self) -> Instant {
     //     self.now
     // }
+
+    fn neighbor_cache_read(&self) -> RwLockReadGuard<NeighborCache> {
+        #[cfg(feature = "std")]
+        return self.neighbor_cache.read().unwrap();
+        #[cfg(not(feature = "std"))]
+        return self.neighbor_cache.read();
+    }
+
+    fn neighbor_cache_write(&self) -> RwLockWriteGuard<NeighborCache> {
+        #[cfg(feature = "std")]
+        return self.neighbor_cache.write().unwrap();
+        #[cfg(not(feature = "std"))]
+        return self.neighbor_cache.write();
+    }
 
     #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
     #[allow(unused)] // unused depending on which sockets are enabled
@@ -920,11 +934,13 @@ impl InterfaceInner {
 
     #[cfg(feature = "socket-raw")]
     fn raw_socket_filter(&self, sockets: &SocketSet, ip_repr: &IpRepr, ip_payload: &[u8]) -> bool {
+        use core::ops::Deref;
+
         let mut handled_by_raw_socket = false;
 
         // Pass every IP packet to all raw sockets we have registered.
         for raw_socket in sockets.items() {
-            if let Some(socket) = raw_socket.socket.try_read().ok() {
+            if let Some(socket) = raw_socket.socket_try_read() {
                 if let Some(socket) = raw::Socket::downcast(&socket) {
                     if !socket.accepts(ip_repr) {
                         continue;
@@ -935,8 +951,8 @@ impl InterfaceInner {
             } else {
                 continue;
             }
-            let mut socket = raw_socket.socket.write().unwrap();
-            let raw_socket = raw::Socket::downcast_mut(&mut socket).unwrap();
+            let mut socket = raw_socket.socket_write();
+            let raw_socket = raw::Socket::downcast_mut(socket.deref_mut()).unwrap();
             raw_socket.process(self, ip_repr, ip_payload);
             handled_by_raw_socket = true;
         }
@@ -1010,16 +1026,12 @@ impl InterfaceInner {
             Some(_routed_addr) => match self.caps.medium {
                 #[cfg(feature = "medium-ethernet")]
                 Medium::Ethernet => self
-                    .neighbor_cache
-                    .read()
-                    .unwrap()
+                    .neighbor_cache_read()
                     .lookup(&_routed_addr, now)
                     .found(),
                 #[cfg(feature = "medium-ieee802154")]
                 Medium::Ieee802154 => self
-                    .neighbor_cache
-                    .read()
-                    .unwrap()
+                    .neighbor_cache_read()
                     .lookup(&_routed_addr, now)
                     .found(),
                 #[cfg(feature = "medium-ip")]
@@ -1094,7 +1106,7 @@ impl InterfaceInner {
 
         let dst_addr = self.route(dst_addr, now).ok_or(DispatchError::NoRoute)?;
 
-        match self.neighbor_cache.read().unwrap().lookup(&dst_addr, now) {
+        match self.neighbor_cache_read().lookup(&dst_addr, now) {
             NeighborAnswer::Found(hardware_addr) => return Ok((hardware_addr, tx_token)),
             NeighborAnswer::RateLimited => return Err(DispatchError::NeighborPending),
             _ => (), // XXX
@@ -1168,13 +1180,13 @@ impl InterfaceInner {
         }
 
         // The request got dispatched, limit the rate on the cache.
-        self.neighbor_cache.write().unwrap().limit_rate(now);
+        self.neighbor_cache_write().limit_rate(now);
         Err(DispatchError::NeighborPending)
     }
 
     fn flush_neighbor_cache(&mut self) {
         #[cfg(any(feature = "medium-ethernet", feature = "medium-ieee802154"))]
-        self.neighbor_cache.write().unwrap().flush()
+        self.neighbor_cache_write().flush()
     }
 
     fn dispatch_ip<Tx: TxToken>(

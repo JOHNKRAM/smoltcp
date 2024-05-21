@@ -22,7 +22,7 @@ use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr};
 
 use core_affinity::{get_core_ids, set_for_current, CoreId};
 
-const THREADS: usize = 7;
+const THREADS: usize = QUEUE_COUNT;
 const AMOUNT: usize = 1_000_000_000;
 
 enum Client {
@@ -103,7 +103,7 @@ fn server<D>(
             if item.queue_id.load(Ordering::Relaxed) != id {
                 continue;
             }
-            let mut socket_guard = item.socket.write().unwrap();
+            let mut socket_guard = item.socket_write();
             let socket = tcp::Socket::downcast_mut(socket_guard.deref_mut()).unwrap();
 
             let port = socket.listen_endpoint.port as usize;

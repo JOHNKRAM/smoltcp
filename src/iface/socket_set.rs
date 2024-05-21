@@ -1,6 +1,5 @@
 use core::{
     fmt,
-    ops::DerefMut,
     sync::atomic::{AtomicUsize, Ordering::Relaxed},
 };
 use managed::ManagedSlice;
@@ -11,7 +10,10 @@ use crate::{
     socket::{AnySocket, Socket},
 };
 
-use std::sync::{RwLock, RwLockWriteGuard};
+#[cfg(feature = "std")]
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+#[cfg(not(feature = "std"))]
+use spin::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 /// Opaque struct with space for storing one socket.
 ///
@@ -32,6 +34,50 @@ pub struct Item<'a> {
     pub meta: RwLock<Meta>,
     pub queue_id: AtomicUsize,
     pub socket: RwLock<Socket<'a>>,
+}
+
+impl<'a> Item<'a> {
+    pub fn socket_read(&self) -> RwLockReadGuard<Socket<'a>> {
+        #[cfg(feature = "std")]
+        return self.socket.read().unwrap();
+        #[cfg(not(feature = "std"))]
+        return self.socket.read();
+    }
+
+    pub fn socket_write(&self) -> RwLockWriteGuard<Socket<'a>> {
+        #[cfg(feature = "std")]
+        return self.socket.write().unwrap();
+        #[cfg(not(feature = "std"))]
+        return self.socket.write();
+    }
+
+    pub fn socket_try_read(&self) -> Option<RwLockReadGuard<Socket<'a>>> {
+        #[cfg(feature = "std")]
+        return self.socket.try_read().ok();
+        #[cfg(not(feature = "std"))]
+        return self.socket.try_read();
+    }
+
+    pub fn socket_into_inner(self) -> Socket<'a> {
+        #[cfg(feature = "std")]
+        return self.socket.into_inner().unwrap();
+        #[cfg(not(feature = "std"))]
+        return self.socket.into_inner();
+    }
+
+    pub fn meta_read(&self) -> RwLockReadGuard<Meta> {
+        #[cfg(feature = "std")]
+        return self.meta.read().unwrap();
+        #[cfg(not(feature = "std"))]
+        return self.meta.read();
+    }
+
+    pub fn meta_write(&self) -> RwLockWriteGuard<Meta> {
+        #[cfg(feature = "std")]
+        return self.meta.write().unwrap();
+        #[cfg(not(feature = "std"))]
+        return self.meta.write();
+    }
 }
 
 /// A handle, identifying a socket in an Interface.
@@ -144,7 +190,10 @@ impl<'a> SocketSet<'a> {
     /// or the socket has the wrong type.
     pub fn get_mut<T: AnySocket<'a>>(&self, handle: SocketHandle) -> RwLockWriteGuard<Socket<'a>> {
         match self.sockets[handle.0].inner.as_ref() {
-            Some(item) => item.socket.write().unwrap(),
+            #[cfg(feature = "std")]
+            Some(item) => item.socket_write(),
+            #[cfg(not(feature = "std"))]
+            Some(item) => item.socket.write(),
             None => panic!("handle does not refer to a valid socket"),
         }
     }
@@ -156,7 +205,10 @@ impl<'a> SocketSet<'a> {
     pub fn remove(&mut self, handle: SocketHandle) -> Socket<'a> {
         net_trace!("[{}]: removing", handle.0);
         match self.sockets[handle.0].inner.take() {
-            Some(item) => item.socket.into_inner().unwrap(),
+            #[cfg(feature = "std")]
+            Some(item) => item.socket_into_inner(),
+            #[cfg(not(feature = "std"))]
+            Some(item) => item.socket.into_inner(),
             None => panic!("handle does not refer to a valid socket"),
         }
     }

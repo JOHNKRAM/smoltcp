@@ -28,7 +28,7 @@ impl InterfaceInner {
 
         #[cfg(feature = "socket-udp")]
         for udp_socket in sockets.items() {
-            if let Some(socket) = udp_socket.socket.try_read().ok() {
+            if let Some(socket) = udp_socket.socket_try_read() {
                 if let Some(socket) = UdpSocket::downcast(&socket) {
                     if !socket.accepts(self, &ip_repr, &udp_repr) {
                         continue;
@@ -40,15 +40,15 @@ impl InterfaceInner {
                 continue;
             }
             udp_socket.queue_id.store(queue_id, Relaxed);
-            let mut socket = udp_socket.socket.write().unwrap();
-            let udp_socket = UdpSocket::downcast_mut(&mut socket).unwrap();
+            let mut socket = udp_socket.socket_write();
+            let udp_socket = UdpSocket::downcast_mut(socket.deref_mut()).unwrap();
             udp_socket.process(self, meta, &ip_repr, &udp_repr, udp_packet.payload());
             return None;
         }
 
         #[cfg(feature = "socket-dns")]
         for dns_socket in sockets.items() {
-            if let Some(socket) = dns_socket.socket.try_read().ok() {
+            if let Some(socket) = dns_socket.socket_try_read() {
                 if let Some(socket) = DnsSocket::downcast(&socket) {
                     if !socket.accepts(&ip_repr, &udp_repr) {
                         continue;
@@ -60,8 +60,8 @@ impl InterfaceInner {
                 continue;
             }
             dns_socket.queue_id.store(queue_id, Relaxed);
-            let mut socket = dns_socket.socket.write().unwrap();
-            let dns_socket = DnsSocket::downcast_mut(&mut socket).unwrap();
+            let mut socket = dns_socket.socket_write();
+            let dns_socket = DnsSocket::downcast_mut(socket.deref_mut()).unwrap();
             dns_socket.process(self, &ip_repr, &udp_repr, udp_packet.payload());
             return None;
         }
