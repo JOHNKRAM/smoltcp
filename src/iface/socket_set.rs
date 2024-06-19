@@ -10,10 +10,10 @@ use crate::{
     socket::{AnySocket, Socket},
 };
 
-#[cfg(feature = "std")]
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 #[cfg(not(feature = "std"))]
 use spin::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+#[cfg(feature = "std")]
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 /// Opaque struct with space for storing one socket.
 ///

@@ -39,11 +39,10 @@ use core::sync::atomic::AtomicU16;
 #[cfg(feature = "medium-ieee802154")]
 use core::sync::atomic::AtomicU8;
 use core::sync::atomic::Ordering::Relaxed;
-#[cfg(feature = "std")]
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 #[cfg(not(feature = "std"))]
 use spin::{RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::os::fd::RawFd;
+#[cfg(feature = "std")]
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use heapless::{LinearMap, Vec};
 
@@ -180,7 +179,7 @@ impl Interface {
     /// # Panics
     /// This function panics if the [`Config::hardware_address`] does not match
     /// the medium of the device.
-    pub fn new<D>(config: Config, device: &mut D, now: Instant) -> Self
+    pub fn new<D>(config: Config, device: &mut D) -> Self
     where
         D: Device + ?Sized,
     {
@@ -536,7 +535,6 @@ impl Interface {
                 // println!("{} start to check a socket", queue_id);
                 let socket_poll_at = item.socket_read().poll_at(inner);
                 // println!("{} end to check a socket", queue_id);
-                #[cfg(feature = "std")]
                 match item.meta_read().poll_at(socket_poll_at, |ip_addr| {
                     inner.has_neighbor(&ip_addr, timestamp)
                 }) {
@@ -934,8 +932,6 @@ impl InterfaceInner {
 
     #[cfg(feature = "socket-raw")]
     fn raw_socket_filter(&self, sockets: &SocketSet, ip_repr: &IpRepr, ip_payload: &[u8]) -> bool {
-        use core::ops::Deref;
-
         let mut handled_by_raw_socket = false;
 
         // Pass every IP packet to all raw sockets we have registered.

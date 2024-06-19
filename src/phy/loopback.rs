@@ -4,6 +4,9 @@ use alloc::vec::Vec;
 use crate::config::QUEUE_COUNT;
 use crate::phy::{self, Device, DeviceCapabilities, Medium};
 use crate::time::Instant;
+#[cfg(not(feature = "std"))]
+use spin::{Mutex, MutexGuard};
+#[cfg(feature = "std")]
 use std::sync::{Mutex, MutexGuard};
 
 /// A loopback device.
@@ -44,22 +47,28 @@ impl Device for Loopback {
         _timestamp: Instant,
         queue_id: usize,
     ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        self.queue[queue_id]
-            .lock()
-            .unwrap()
-            .pop_front()
-            .map(move |buffer| {
-                let rx = RxToken { buffer };
-                let tx = TxToken {
-                    queue: self.queue[queue_id].lock().unwrap(),
-                };
-                (rx, tx)
-            })
+        #[cfg(feature = "std")]
+        let mut lock = self.queue[queue_id].lock().unwrap();
+        #[cfg(not(feature = "std"))]
+        let mut lock = self.queue[queue_id].lock();
+        lock.pop_front().map(move |buffer| {
+            let rx = RxToken { buffer };
+            let tx = TxToken {
+                #[cfg(feature = "std")]
+                queue: self.queue[queue_id].lock().unwrap(),
+                #[cfg(not(feature = "std"))]
+                queue: self.queue[queue_id].lock(),
+            };
+            (rx, tx)
+        })
     }
 
     fn transmit(&self, _timestamp: Instant, queue_id: usize) -> Option<Self::TxToken<'_>> {
         Some(TxToken {
+            #[cfg(feature = "std")]
             queue: self.queue[queue_id].lock().unwrap(),
+            #[cfg(not(feature = "std"))]
+            queue: self.queue[queue_id].lock(),
         })
     }
 }

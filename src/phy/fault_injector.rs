@@ -4,6 +4,9 @@ use crate::time::{Duration, Instant};
 
 use super::PacketMeta;
 
+#[cfg(not(feature = "std"))]
+use spin::{Mutex, MutexGuard};
+#[cfg(feature = "std")]
 use std::sync::{Mutex, MutexGuard};
 
 // We use our own RNG to stay compatible with #![no_std].
@@ -133,7 +136,11 @@ impl<D: Device> FaultInjector<D> {
             rx_buf: Default::default(),
         };
         for i in 0..QUEUE_COUNT {
-            f.state[i].get_mut().unwrap().rng_seed = seed + i as u32;
+            #[cfg(feature = "std")]
+            let state = f.state[i].get_mut().unwrap();
+            #[cfg(not(feature = "std"))]
+            let state = f.state[i].get_mut();
+            state.rng_seed = seed + i as u32;
         }
         f
     }
@@ -213,7 +220,11 @@ impl<D: Device> FaultInjector<D> {
     /// Set the interval for packet rate limiting, in milliseconds.
     pub fn set_bucket_interval(&mut self, interval: Duration) {
         for i in 0..QUEUE_COUNT {
-            self.state[i].get_mut().unwrap().refilled_at = Instant::from_millis(0);
+            #[cfg(feature = "std")]
+            let state = self.state[i].get_mut().unwrap();
+            #[cfg(not(feature = "std"))]
+            let state = self.state[i].get_mut();
+            state.refilled_at = Instant::from_millis(0);
         }
         self.config.interval = interval
     }
@@ -240,7 +251,10 @@ impl<D: Device> Device for FaultInjector<D> {
         timestamp: Instant,
         queue_id: usize,
     ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+        #[cfg(feature = "std")]
         let mut state = self.state[queue_id].try_lock().ok()?;
+        #[cfg(not(feature = "std"))]
+        let mut state = self.state[queue_id].try_lock()?;
         let mut rx_buf = self.rx_buf[queue_id].try_lock().unwrap();
         let (rx_token, tx_token) = self.inner.receive(timestamp, queue_id)?;
         let rx_meta = <D::RxToken<'_> as phy::RxToken>::meta(&rx_token);
@@ -288,7 +302,10 @@ impl<D: Device> Device for FaultInjector<D> {
     }
 
     fn transmit(&self, timestamp: Instant, queue_id: usize) -> Option<Self::TxToken<'_>> {
+        #[cfg(feature = "std")]
         let state = self.state[queue_id].try_lock().ok()?;
+        #[cfg(not(feature = "std"))]
+        let state = self.state[queue_id].try_lock()?;
         self.inner
             .transmit(timestamp, queue_id)
             .map(|token| TxToken {
